@@ -1,0 +1,86 @@
+meta {
+  name: 04 Update insurance
+  type: http
+  seq: 4
+}
+
+put {
+  url: {{baseUrl}}/api/insurances/{{insuranceUid}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{authToken}}
+}
+
+body:json {
+  {
+    "clientUid": "{{clientUid}}",
+    "provider": "Atupri",
+    "productName": "Mivita Basic",
+    "type": "LAMAL",
+    "description": "Passage au modèle télémédecine",
+    "policyNumber": "POL-100",
+    "startDate": "2024-01-01",
+    "endDate": "2026-12-31",
+    "autoRenew": true,
+    "premiumAmount": 389.90,
+    "premiumFrequency": "MENSUEL",
+    "franchise": 2500,
+    "cancellationNoticeMonths": 1,
+    "tariffType": "HAM",
+    "tariffCode": "CareMed",
+    "employerAccidentCoverage": true
+  }
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("prime mise à jour", function () {
+    expect(res.getBody().insurance.premiumAmount).to.equal(389.9);
+    expect(res.getBody().insurance.monthlyPremium).to.equal(389.9);
+  });
+
+  test("uid inchangé", function () {
+    expect(res.getBody().insurance.uid).to.equal(bru.getEnvVar("insuranceUid"));
+  });
+
+  test("échéance de résiliation calculée", function () {
+    // endDate 31.12.2026 moins 1 mois de préavis.
+    expect(res.getBody().insurance.cancellationDeadline).to.contain("2026-11-30");
+  });
+}
+
+docs {
+  Remplacement complet du contrat — le corps suit le **même schéma que la
+  création**.
+
+  C'est un `PUT`, pas un `PATCH` : les champs facultatifs omis ne sont pas
+  conservés, ils repartent à leur valeur par défaut (`status` → `ACTIVE`,
+  `premiumFrequency` → `MENSUEL`, `currency` → `CHF`, `autoRenew` → `true`,
+  `employerAccidentCoverage` → `false`) ou sont effacés (`description`,
+  `franchise`, `notes`…). Renvoyez donc l'objet entier, pas seulement le champ
+  modifié.
+
+  Ce n'est pas théorique : omettre `employerAccidentCoverage` ici remettait
+  silencieusement la couverture accident dans la LAMal, et la comparaison
+  priminfo affichait ensuite des primes trop élevées.
+
+  `clientUid` permet de **déplacer un contrat vers un autre membre du foyer**.
+  Un assuré hors du foyer renvoie 404 : un contrat ne peut pas sortir du compte.
+
+  ## Variantes
+
+  | Modification | Attendu |
+  |---|---|
+  | `uid` inexistant dans l'URL | 404 |
+  | `"type": "INEXISTANT"` | 400 |
+  | `endDate` absente | 400 — obligatoire, y compris en modification |
+  | `"premiumAmount": -1` | 400 |
+  | contrat d'un autre compte | 404 |
+}

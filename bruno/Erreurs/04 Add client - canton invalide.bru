@@ -1,0 +1,57 @@
+meta {
+  name: 04 Add client - canton invalide
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/api/clients
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{authToken}}
+}
+
+body:json {
+  {
+    "name": "Muster",
+    "firstname": "Test",
+    "birthdate": "2000-01-01",
+    "phone": "+41791234569",
+    "road": "Bahnhofstrasse 1",
+    "plz": "8001",
+    "location": "Zurich",
+    "canton": "XX",
+    "nationality": "CH",
+    "avsNum": "756.1111.2222.44",
+    "sexe": "M"
+  }
+}
+
+tests {
+  test("répond 400", function () {
+    expect(res.getStatus()).to.equal(400);
+  });
+
+  test("canton refusé", function () {
+    expect(res.getBody().code).to.equal("VALIDATION_ERROR");
+    expect(res.getBody().message).to.contain("Canton");
+  });
+}
+
+docs {
+  Le canton doit faire partie des 26 cantons suisses.
+
+  Autres validations à éprouver depuis cette requête :
+
+  | Champ modifié | Attendu |
+  |---|---|
+  | `"plz": "800"` | 400 — le NPA doit comporter 4 chiffres |
+  | `"sexe": "Z"` | 400 — sexe invalide (`M`, `F` ou `X`) |
+  | `"birthdate": "2099-01-01"` | 400 — date dans le futur |
+  | `"birthdate": "pas-une-date"` | 400 — date invalide |
+  | `"name": ""` | 400 — le nom est obligatoire |
+}

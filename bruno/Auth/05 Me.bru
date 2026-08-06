@@ -1,0 +1,33 @@
+meta {
+  name: 05 Me
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/api/auth/me
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{authToken}}
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("renvoie le compte et ses clients", function () {
+    expect(res.getBody().user.email).to.equal(bru.getEnvVar("userEmail"));
+    expect(res.getBody().clients).to.be.an("array");
+  });
+}
+
+docs {
+  Compte courant et clients rattachés. Utile pour rafraîchir l'état côté mobile
+  au lancement de l'application.
+
+  Sans en-tête `Authorization`, ou avec un jeton inconnu : **401**.
+}

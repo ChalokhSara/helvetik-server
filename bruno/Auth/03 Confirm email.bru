@@ -1,0 +1,45 @@
+meta {
+  name: 03 Confirm email
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/auth/confirm-email?token={{confirmToken}}
+  body: none
+  auth: none
+}
+
+params:query {
+  token: {{confirmToken}}
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("renvoie du HTML", function () {
+    expect(res.getHeader("content-type")).to.contain("text/html");
+  });
+}
+
+docs {
+  Confirme l'adresse email. Cette route renvoie du **HTML** et non du JSON :
+  elle est ouverte dans un navigateur depuis le lien reçu par email.
+
+  ## Le jeton
+
+  `confirmToken` est renseigné automatiquement par la requête précédente
+  (« 02 Get token from Mailpit »). Il n'y a rien à copier à la main.
+
+  Le jeton ne transite que par email : l'API ne le renvoie jamais dans une
+  réponse, et la base n'en garde que l'empreinte SHA-256. Le lien est aussi
+  cliquable depuis <http://localhost:8025>.
+
+  ## À vérifier
+
+  - Jeton à usage unique : rejouer la requête renvoie **400**.
+  - Jeton expiré au bout de 24 h : **400**.
+  - Jeton bidon (`confirmToken` = `deadbeef`) : **400**.
+}

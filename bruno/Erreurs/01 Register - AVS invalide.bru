@@ -1,0 +1,59 @@
+meta {
+  name: 01 Register - AVS invalide
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/api/auth/register
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "email": "orphan@example.com",
+    "password": "Sup3rSecret!",
+    "client": {
+      "name": "Muster",
+      "firstname": "Test",
+      "birthdate": "1990-04-12",
+      "phone": "+41791234567",
+      "road": "Bahnhofstrasse 1",
+      "plz": "8001",
+      "location": "Zurich",
+      "canton": "ZH",
+      "nationality": "CH",
+      "avsNum": "12345",
+      "sexe": "F"
+    }
+  }
+}
+
+tests {
+  test("répond 400", function () {
+    expect(res.getStatus()).to.equal(400);
+  });
+
+  test("message métier explicite", function () {
+    expect(res.getBody().code).to.equal("VALIDATION_ERROR");
+    expect(res.getBody().message).to.contain("756");
+  });
+}
+
+docs {
+  Le numéro AVS doit respecter le format `756.XXXX.XXXX.XX`.
+
+  Ce test couvre surtout un point non évident : l'inscription crée l'utilisateur
+  **avant** le client, sans transaction (MongoDB n'est pas garanti en replica
+  set). Quand la création du client échoue, l'utilisateur est supprimé dans la
+  foulée — sinon un `md_user` orphelin bloquerait toute nouvelle tentative avec
+  le même email.
+
+  Pour le vérifier, rejouez ensuite « 01 Register » avec
+  `userEmail = orphan@example.com` : la réponse doit être **201**, pas 409.
+}

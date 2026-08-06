@@ -1,0 +1,102 @@
+meta {
+  name: 01 Add insurance
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/api/insurances
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{authToken}}
+}
+
+body:json {
+  {
+    "clientUid": "{{clientUid}}",
+    "provider": "Atupri",
+    "productName": "Mivita Basic",
+    "type": "LAMAL",
+    "description": "Assurance de base, modèle médecin de famille",
+    "policyNumber": "POL-100",
+    "startDate": "2024-01-01",
+    "endDate": "2026-12-31",
+    "autoRenew": true,
+    "premiumAmount": 412.50,
+    "premiumFrequency": "MENSUEL",
+    "franchise": 2500,
+    "cancellationNoticeMonths": 1,
+    "tariffType": "HAM",
+    "tariffCode": "CareMed",
+    "employerAccidentCoverage": true
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 201) {
+    bru.setEnvVar("insuranceUid", res.getBody().insurance.uid);
+  }
+}
+
+tests {
+  test("répond 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+
+  test("rattachée à l'assuré demandé", function () {
+    expect(res.getBody().insurance.insured.uid).to.equal(bru.getEnvVar("clientUid"));
+  });
+
+  test("prime ramenée au mois", function () {
+    expect(res.getBody().insurance.monthlyPremium).to.equal(412.5);
+  });
+}
+
+docs {
+  Ajoute un contrat à un assuré du foyer.
+
+  `clientUid` est renseigné automatiquement par `Auth / 04 Login` (premier client
+  du compte). Pour rattacher le contrat à un autre membre, récupérez son `uid`
+  via `Clients / 01 List clients`.
+
+  Le titulaire (`userUid`) est déduit du jeton, jamais du corps de la requête :
+  impossible de greffer un contrat sur le client de quelqu'un d'autre. Un
+  `clientUid` étranger au foyer renvoie **404**.
+
+  ## Champs
+
+  Obligatoires : `clientUid`, `provider`, `productName`, `type`, `policyNumber`,
+  `startDate`, `endDate`, `premiumAmount`.
+
+  `endDate` est le **terme de la période contractuelle en cours**, pas la fin
+  définitive du contrat : le 31.12 de l'année pour une LAMal, la date
+  anniversaire ailleurs. Sur un contrat à reconduction tacite, on la renseigne
+  quand même et on laisse `autoRenew` à `true` — c'est d'elle que dépendent
+  l'échéance de résiliation (`cancellationDeadline`, renvoyée par l'API) et
+  les rappels que l'application pourra en déduire.
+
+  Facultatifs : `description`, `status` (défaut `ACTIVE`), `premiumFrequency`
+  (défaut `MENSUEL`), `currency` (défaut `CHF`), `franchise`, `coverageAmount`,
+  `cancellationNoticeMonths`, `autoRenew` (défaut `true`),
+  `employerAccidentCoverage` (défaut `false`), `notes`.
+
+  `employerAccidentCoverage` ne concerne que la **LAMal** : à `true`, l'assuré
+  est couvert contre les accidents par son employeur et sa LAMal exclut cette
+  couverture, ce qui réduit la prime. Ce champ pilote le paramètre `coverage`
+  du comparateur priminfo — voir `Comparison / 01 Priminfo link`.
+
+  ## Variantes à essayer
+
+  | Modification | Attendu |
+  |---|---|
+  | `"type": "INEXISTANT"` | 400 — type invalide |
+  | `"clientUid": "inconnu"` | 404 |
+  | `endDate` absente | 400 — la date de fin est obligatoire |
+  | `"endDate": "2020-01-01"` | 400 — antérieure au début |
+  | `"premiumAmount": -10` | 400 — prime négative |
+  | `premiumAmount` absent | 400 — la prime est obligatoire |
+}

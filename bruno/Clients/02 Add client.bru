@@ -1,0 +1,58 @@
+meta {
+  name: 02 Add client
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/clients
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{authToken}}
+}
+
+body:json {
+  {
+    "name": "Muster",
+    "firstname": "Leo",
+    "birthdate": "2015-09-03",
+    "phone": "+41791234568",
+    "road": "Bahnhofstrasse 1",
+    "plz": "8001",
+    "location": "Zurich",
+    "canton": "ZH",
+    "nationality": "CH",
+    "avsNum": "756.1111.2222.33",
+    "sexe": "M"
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 201) {
+    bru.setEnvVar("clientUid", res.getBody().client.uid);
+  }
+}
+
+tests {
+  test("répond 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+
+  test("est rattaché au compte courant", function () {
+    expect(res.getBody().client.uid).to.be.a("string");
+  });
+}
+
+docs {
+  Ajoute un membre de la famille au compte authentifié. Le rattachement
+  (`userUid`) vient du jeton, jamais du corps de la requête : impossible de
+  créer un client chez quelqu'un d'autre.
+
+  Sans `email`, le membre hérite de celui du titulaire du compte.
+
+  Plafond : 20 clients par compte, au-delà **409** `TOO_MANY_CLIENTS`.
+}

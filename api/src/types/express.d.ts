@@ -1,12 +1,12 @@
-import { Request } from 'express';
-import { Grant } from 'keycloak-connect';
+import { IUser } from '../models/user.model';
 
 declare global {
   namespace Express {
     interface Request {
-      kauth?: {
-        grant?: Grant;
-      };
+      /** Utilisateur mobile authentifié par jeton Bearer (cf. middleware/require-user). */
+      authUser?: IUser;
     }
   }
-} 
+}
+
+export {};

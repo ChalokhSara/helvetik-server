@@ -1,0 +1,35 @@
+meta {
+  name: 02 Logout
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/auth/logout
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{authToken}}
+}
+
+tests {
+  test("répond 204", function () {
+    expect(res.getStatus()).to.equal(204);
+  });
+}
+
+docs {
+  Révoque le jeton courant côté serveur (suppression dans `md_user_token`).
+
+  À vérifier : rejouer `Auth / 05 Me` juste après renvoie **401**. C'est
+  l'intérêt des jetons opaques par rapport à un JWT — la révocation est
+  immédiate, sans attendre l'expiration.
+
+  Cette requête est isolée dans son propre dossier, ordonné en dernier :
+  laissée au milieu du flux, elle invalidait `authToken` et faisait échouer en
+  401 toutes les requêtes suivantes d'un run complet.
+
+  Après l'avoir jouée, rejouez `Auth / 04 Login` pour continuer à tester.
+}

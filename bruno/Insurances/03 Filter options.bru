@@ -1,0 +1,39 @@
+meta {
+  name: 03 Filter options
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/insurances/filters
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{authToken}}
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("énumérations complètes", function () {
+    expect(res.getBody().types).to.include("LAMAL");
+    expect(res.getBody().statuses).to.include("ACTIVE");
+  });
+
+  test("prestataires réellement présents", function () {
+    expect(res.getBody().providers).to.be.an("array");
+  });
+}
+
+docs {
+  Alimente les listes déroulantes de l'application mobile.
+
+  `types` et `statuses` sont les énumérations complètes ; `providers` ne contient
+  que les prestataires réellement présents dans le foyer, et `insured` la liste
+  des membres — de quoi construire un écran de filtres sans coder en dur des
+  valeurs qui évolueraient côté serveur.
+}

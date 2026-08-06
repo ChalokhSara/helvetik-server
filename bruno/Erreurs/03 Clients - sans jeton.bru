@@ -1,0 +1,31 @@
+meta {
+  name: 03 Clients - sans jeton
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/clients
+  body: none
+  auth: none
+}
+
+tests {
+  test("répond 401", function () {
+    expect(res.getStatus()).to.equal(401);
+  });
+
+  test("code UNAUTHENTICATED", function () {
+    expect(res.getBody().code).to.equal("UNAUTHENTICATED");
+  });
+}
+
+docs {
+  Aucun en-tête `Authorization` : l'espace client est intégralement protégé.
+
+  Variantes à essayer en modifiant l'en-tête :
+
+  - `Authorization: Bearer deadbeef` → 401 `INVALID_TOKEN`
+  - jeton révoqué par « 06 Logout » → 401 `INVALID_TOKEN`
+  - jeton d'un compte bloqué depuis la console admin → 403 `ACCOUNT_BLOCKED`
+}

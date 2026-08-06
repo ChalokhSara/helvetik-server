@@ -1,0 +1,42 @@
+meta {
+  name: 01 Delete insurance
+  type: http
+  seq: 1
+}
+
+delete {
+  url: {{baseUrl}}/api/insurances/{{insuranceUid}}
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{authToken}}
+}
+
+tests {
+  test("répond 204", function () {
+    expect(res.getStatus()).to.equal(204);
+  });
+}
+
+docs {
+  Suppression **définitive** du contrat.
+
+  Cette requête est placée dans le dossier de fin de session, et non à la suite
+  des autres requêtes `Insurances` : elle supprimait le contrat LAMal avant que
+  `Comparison / 01 Priminfo link` ne s'exécute, qui retombait alors sur des
+  valeurs par défaut sans que rien ne le signale.
+
+  Contrairement aux utilisateurs et aux clients, que la console bloque pour
+  conserver l'historique, un contrat est réellement effacé. Pour garder trace
+  d'un contrat qui a pris fin, passez plutôt son `status` à `CANCELLED` ou
+  `EXPIRED` via `Insurances / 04 Update insurance`.
+
+  À vérifier : rejouer cette requête renvoie **404**, et un contrat appartenant
+  à un autre compte renvoie **404** lui aussi — jamais 403, pour ne rien
+  révéler de son existence.
+
+  Pensez à rejouer `Insurances / 01 Add insurance` pour retrouver un contrat
+  de test.
+}

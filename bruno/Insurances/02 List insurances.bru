@@ -1,0 +1,81 @@
+meta {
+  name: 02 List insurances
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/insurances?sort=-startDate
+  body: none
+  auth: none
+}
+
+params:query {
+  sort: -startDate
+  ~clientUid: {{clientUid}}
+  ~type: LAMAL,MENAGE
+  ~status: ACTIVE
+  ~provider: helvetia
+  ~q: primeo
+  ~activeOn: today
+  ~endingBefore: 2026-12-31
+  ~page: 1
+  ~limit: 50
+}
+
+headers {
+  Authorization: Bearer {{authToken}}
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("couvre tout le foyer", function () {
+    expect(res.getBody().insurances).to.be.an("array");
+    expect(res.getBody().summary.total).to.be.at.least(1);
+  });
+
+  test("total des primes cohérent", function () {
+    const body = res.getBody();
+    expect(body.summary.monthlyPremium).to.be.a("number");
+    expect(body.summary.yearlyPremium).to.equal(
+      Number((body.summary.monthlyPremium * 12).toFixed(2))
+    );
+  });
+}
+
+docs {
+  Assurances de **tout le foyer** : celles du titulaire et celles de chaque
+  membre de la famille. Chaque ligne porte l'assuré concerné sous `insured`.
+
+  Les filtres sont désactivés par défaut (préfixe `~` dans l'onglet Params) :
+  cochez-les pour les activer, ils se cumulent.
+
+  | Filtre | Effet |
+  |---|---|
+  | `clientUid` | un seul assuré du foyer |
+  | `type` | plusieurs valeurs séparées par des virgules |
+  | `status` | idem — `ACTIVE`, `PENDING`, `EXPIRED`, `CANCELLED` |
+  | `provider` | correspondance partielle, insensible à la casse |
+  | `q` | recherche libre : prestataire, offre, n° de police, description |
+  | `activeOn` | `today` ou une date — contrats en vigueur à cette date |
+  | `endingBefore` | contrats arrivant à terme avant cette date |
+  | `sort` | `startDate`, `endDate`, `premium`, `provider`, `type` — `-` pour décroissant |
+  | `page`, `limit` | 50 par défaut, 200 maximum |
+
+  ## Le bloc `summary`
+
+  `monthlyPremium` additionne les contrats en ramenant chaque prime au mois,
+  quelle que soit sa périodicité — sans quoi mélanger un contrat mensuel et un
+  contrat annuel n'aurait aucun sens.
+
+  Il porte sur **l'ensemble du filtre**, pas sur la page affichée : le montant
+  ne bouge donc pas quand on tourne les pages.
+
+  ## Filtres invalides
+
+  Un `type`, `status` ou `sort` inconnu renvoie **400** avec la liste des
+  valeurs acceptées. Un `clientUid` hors du foyer renvoie **404**.
+}

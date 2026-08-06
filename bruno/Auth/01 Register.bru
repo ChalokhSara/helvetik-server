@@ -1,0 +1,69 @@
+meta {
+  name: 01 Register
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/api/auth/register
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "email": "{{userEmail}}",
+    "password": "{{userPassword}}",
+    "client": {
+      "name": "Muster",
+      "firstname": "Anna",
+      "birthdate": "1990-04-12",
+      "phone": "+41791234567",
+      "road": "Bahnhofstrasse 1",
+      "plz": "8001",
+      "location": "Zurich",
+      "canton": "ZH",
+      "nationality": "CH",
+      "avsNum": "756.1234.5678.90",
+      "sexe": "F"
+    }
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 201) {
+    bru.setEnvVar("userUid", res.getBody().user.uid);
+  }
+}
+
+tests {
+  test("répond 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+
+  test("email pas encore confirmé", function () {
+    expect(res.getBody().user.emailVerified).to.equal(false);
+  });
+
+  test("ne renvoie ni mot de passe ni salt", function () {
+    expect(res.getBody().user.password).to.equal(undefined);
+    expect(res.getBody().user.salt).to.equal(undefined);
+  });
+}
+
+docs {
+  Crée l'utilisateur (`md_user`) et son client titulaire (`md_client`).
+
+  Le client hérite de l'email du compte si le champ `client.email` est absent.
+
+  Rejouer cette requête avec le même `userEmail` renvoie **409** : c'est le
+  comportement attendu. Pour repartir de zéro, changez `userEmail` dans
+  l'environnement, ou videz la base (voir le README de la collection).
+
+  Le lien de confirmation part par email. Aucun SMTP n'étant branché, il est
+  écrit dans les logs du serveur — voir la requête « 02 Confirm email ».
+}

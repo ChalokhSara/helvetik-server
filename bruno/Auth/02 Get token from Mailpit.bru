@@ -1,0 +1,57 @@
+meta {
+  name: 02 Get token from Mailpit
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{mailpitUrl}}/api/v1/message/latest
+  body: none
+  auth: none
+}
+
+script:post-response {
+  // Extrait le jeton du dernier email reçu et l'injecte dans confirmToken,
+  // pour que « 03 Confirm email » s'exécute sans copier-coller.
+  if (res.getStatus() === 200) {
+    const body = res.getBody();
+    const match = String(body.Text || "").match(/token=([a-f0-9]+)/);
+    if (match) {
+      bru.setEnvVar("confirmToken", match[1]);
+    }
+  }
+}
+
+tests {
+  test("un email est arrivé", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("c'est bien l'email de confirmation", function () {
+    expect(res.getBody().Subject).to.contain("confirmez votre adresse email");
+  });
+
+  test("destinataire attendu", function () {
+    expect(res.getBody().To[0].Address).to.equal(bru.getEnvVar("userEmail"));
+  });
+
+  test("jeton extrait", function () {
+    expect(bru.getEnvVar("confirmToken")).to.match(/^[a-f0-9]{64}$/);
+  });
+}
+
+docs {
+  Interroge **Mailpit**, le serveur SMTP de développement lancé par
+  `docker compose up`, et récupère le jeton du dernier email reçu.
+
+  Cette requête ne touche pas l'API Helvetik : elle parle à la boîte de
+  réception. C'est ce qui permet d'automatiser la confirmation sans que l'API
+  n'expose jamais le jeton — celui-ci ne sort que par email, comme en production.
+
+  Les emails restent aussi consultables à l'œil sur <http://localhost:8025>.
+
+  Attention : `latest` renvoie le **dernier** message reçu, tous destinataires
+  confondus. Si vous testez plusieurs comptes en parallèle, vérifiez le
+  destinataire (le test le fait) ou passez par la liste :
+  `{{mailpitUrl}}/api/v1/search?query=to:anna@example.com`.
+}

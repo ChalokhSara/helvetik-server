@@ -1,0 +1,134 @@
+meta {
+  name: 02 LAMal optimisation
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/comparison/lamal-optimisation?limit=5
+  body: none
+  auth: none
+}
+
+params:query {
+  limit: 5
+  ~clientUid: {{clientUid}}
+  ~lang: fr
+  ~coverage: 1
+  ~models: BASE,HAM,HMO,DIV
+  ~persons: false
+  ~refresh: true
+}
+
+headers {
+  Authorization: Bearer {{authToken}}
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("des offres sont extraites", function () {
+    expect(res.getBody().totalOffers).to.be.at.least(1);
+    expect(res.getBody().offers.length).to.be.at.least(1);
+  });
+
+  test("montants exploitables", function () {
+    const best = res.getBody().best;
+    expect(best.insurer).to.be.a("string");
+    expect(best.monthly.total).to.be.a("number");
+    expect(best.yearly.total).to.be.a("number");
+  });
+
+  test("prime moins redistribution égale le total", function () {
+    res.getBody().offers.forEach(function (o) {
+      if (o.monthly.premium !== null && o.monthly.redistribution !== null) {
+        expect(Math.abs((o.monthly.premium - o.monthly.redistribution) - o.monthly.total))
+          .to.be.below(0.02);
+      }
+    });
+  });
+
+  test("l'annuel vaut douze fois le mensuel", function () {
+    res.getBody().offers.forEach(function (o) {
+      expect(Math.abs(o.monthly.total * 12 - o.yearly.total)).to.be.below(0.05);
+    });
+  });
+
+  test("offres classées de la moins chère à la plus chère", function () {
+    const totals = res.getBody().offers.map(function (o) { return o.monthly.total; });
+    for (var i = 1; i < totals.length; i++) {
+      expect(totals[i]).to.be.at.least(totals[i - 1]);
+    }
+  });
+
+  test("chaque part est rattachée à un assuré du foyer", function () {
+    const uids = res.getBody().insured.map(function (i) { return i.clientUid; });
+    res.getBody().offers.forEach(function (o) {
+      (o.persons || []).forEach(function (p) {
+        expect(uids).to.include(p.clientUid);
+      });
+    });
+  });
+}
+
+docs {
+  **Optimisation LAMal.** Compare les primes du foyer et renvoie le classement
+  en JSON, prêt à être mis en forme dans l'application.
+
+  ## Deux sources possibles
+
+  Le champ `source.provider` indique laquelle a servi :
+
+  - **`OFSP — données officielles`** : calcul local sur les fichiers importés
+    depuis la console d'administration. C'est le mode normal — quelques
+    millisecondes, aucun appel sortant.
+  - **`priminfo.admin.ch`** : repli automatique tant qu'aucune année de primes
+    n'est mise en service. Le serveur interroge alors le site et lit son
+    tableau ; comptez environ une seconde au premier appel.
+
+  Les deux donnent les mêmes chiffres : le calcul local a été validé au centime
+  près contre priminfo, classement et redistribution compris.
+
+  ## Réponse
+
+  | Champ | Contenu |
+  |---|---|
+  | `source` | URL interrogée, horodatage, `cached` |
+  | `location`, `currentInsurer`, `insured` | ce qui a servi à construire la requête |
+  | `current` | le contrat actuel tel que priminfo le chiffre, ou `null` |
+  | `best` | l'offre la moins chère |
+  | `potentialSavings` | économie mensuelle et annuelle, en montant positif |
+  | `offers` | les `limit` offres les moins chères |
+  | `totalOffers` | nombre total d'offres trouvées (souvent plus de 100) |
+  | `warnings` | ce qui n'a pas pu être déduit |
+
+  Chaque offre porte `monthly` et `yearly`, avec `premium` (prime brute),
+  `redistribution` (taxe environnementale reversée), `total` (prime nette) et
+  `savings` (négatif = économie, positif = surcoût). Le détail `persons` donne
+  la part de chaque assuré, rattachée à son `clientUid`.
+
+  ## Paramètres
+
+  - `limit` — nombre d'offres, 20 par défaut, 500 au maximum
+  - `persons=false` — omet le détail par assuré, réponse bien plus légère
+  - `refresh=true` — ignore le cache et réinterroge priminfo
+  - `clientUid`, `lang`, `coverage`, `models` — comme pour `01 Priminfo link`
+
+  ## À savoir
+
+  La **redistribution de la taxe environnementale** (61.80 CHF par assuré et
+  par an en 2026, soit 5.15 par mois) est déduite de la prime brute. Elle ne
+  figure pas dans les fichiers de l'OFSP : elle se saisit dans la console, sur
+  la page des primes officielles.
+
+  Le contrat de référence est le **modèle de base** de votre caisse actuelle,
+  et non son offre la moins chère — sinon l'économie affichée supposerait que
+  vous avez déjà optimisé votre modèle. C'est la convention de priminfo.
+
+  En mode repli, priminfo utilise **deux mises en page différentes** selon
+  qu'il y a un ou plusieurs assurés ; les deux sont gérées, et si sa
+  présentation change la route renvoie **502** `PRIMINFO_PARSE_FAILED` plutôt
+  que des chiffres faux.
+}

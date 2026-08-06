@@ -1,0 +1,41 @@
+meta {
+  name: 06 Resend confirmation
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/api/auth/resend-confirmation
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "email": "{{userEmail}}"
+  }
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Renvoie l'email de confirmation. Un nouveau message arrive donc dans Mailpit :
+  rejouez « 02 Get token from Mailpit » pour récupérer le nouveau jeton.
+
+  La réponse est **toujours 200 avec le même message**, que l'adresse existe,
+  soit déjà confirmée ou soit inconnue. C'est délibéré : une réponse
+  différenciée permettrait d'énumérer les emails inscrits.
+
+  Pour le vérifier, rejouez la requête avec une adresse inexistante — réponse
+  identique, et aucun nouveau message dans Mailpit.
+
+  Un nouveau jeton invalide le précédent.
+}

@@ -1,0 +1,20 @@
+# Fins de ligne normalisées en LF, dans le dépôt comme dans la copie de travail.
+# Le code tourne dans des conteneurs Linux : un CRLF qui traîne casse les
+# scripts shell et laisse un \r en fin de valeur dans les fichiers .env.
+* text=auto eol=lf
+
+# Exception : les scripts batch Windows doivent garder des CRLF, cmd.exe
+# les interprète mal autrement.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Fichiers binaires : aucune conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary

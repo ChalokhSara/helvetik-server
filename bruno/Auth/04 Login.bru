@@ -1,0 +1,67 @@
+meta {
+  name: 04 Login
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/api/auth/login
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "email": "{{userEmail}}",
+    "password": "{{userPassword}}"
+  }
+}
+
+script:post-response {
+  // Alimente authToken pour toutes les requêtes authentifiées de la collection.
+  if (res.getStatus() === 200) {
+    bru.setEnvVar("authToken", res.getBody().token);
+    const clients = res.getBody().clients;
+    if (clients && clients.length) {
+      bru.setEnvVar("clientUid", clients[0].uid);
+    }
+  }
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("renvoie un jeton", function () {
+    expect(res.getBody().token).to.be.a("string");
+    expect(res.getBody().token.length).to.equal(64);
+  });
+
+  test("renvoie les clients du compte", function () {
+    expect(res.getBody().clients).to.be.an("array");
+    expect(res.getBody().clients.length).to.be.at.least(1);
+  });
+}
+
+docs {
+  Connexion. Le jeton renvoyé est enregistré automatiquement dans la variable
+  d'environnement `authToken` : les requêtes suivantes l'utilisent sans copier-coller.
+
+  Le jeton est un **Bearer opaque**, valable 30 jours, révocable (voir « 06 Logout »).
+
+  ## Codes d'erreur distincts
+
+  | Cas | Statut | `code` |
+  |---|---|---|
+  | Email ou mot de passe faux | 401 | `INVALID_CREDENTIALS` |
+  | Email pas encore confirmé | 403 | `EMAIL_NOT_VERIFIED` |
+  | Compte bloqué par un admin | 403 | `ACCOUNT_BLOCKED` |
+
+  `EMAIL_NOT_VERIFIED` est volontairement distinct de `INVALID_CREDENTIALS` :
+  l'application mobile peut ainsi proposer de renvoyer l'email de confirmation.
+}

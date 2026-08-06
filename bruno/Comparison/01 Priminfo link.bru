@@ -1,0 +1,116 @@
+meta {
+  name: 01 Priminfo link
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/comparison/priminfo
+  body: none
+  auth: none
+}
+
+params:query {
+  ~clientUid: {{clientUid}}
+  ~lang: fr
+  ~coverage: 1
+  ~display: savings
+  ~models: BASE,HAM,HMO,DIV
+  ~redirect: true
+}
+
+headers {
+  Authorization: Bearer {{authToken}}
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("URL priminfo construite", function () {
+    expect(res.getBody().url).to.contain("priminfo.admin.ch");
+    expect(res.getBody().url).to.contain("yob%5B0%5D=");
+  });
+
+  test("un assuré au moins", function () {
+    expect(res.getBody().insured.length).to.be.at.least(1);
+  });
+
+  test("alertes exposées", function () {
+    expect(res.getBody().warnings).to.be.an("array");
+  });
+
+  test("couverture accident inversée depuis le contrat", function () {
+    // « Insurances / 01 Add insurance » pose employerAccidentCoverage: true sur
+    // un contrat LAMal ; cet assuré doit donc partir avec coverage=0.
+    const insured = res.getBody().insured;
+    const position = insured.findIndex(function (i) {
+      return i.employerAccidentCoverage === true;
+    });
+
+    expect(position, "aucun assuré couvert par son employeur — le contrat LAMal de test manque").to.be.at.least(0);
+    expect(insured[position].coverage).to.equal(0);
+    expect(insured[position].coverageSource).to.equal("contrat");
+    expect(res.getBody().url).to.contain("coverage%5B" + position + "%5D=0");
+  });
+
+  test("les autres assurés gardent la couverture incluse", function () {
+    res.getBody().insured
+      .filter(function (i) { return i.employerAccidentCoverage !== true; })
+      .forEach(function (i) { expect(i.coverage).to.equal(1); });
+  });
+}
+
+docs {
+  Construit un lien vers **priminfo.admin.ch**, le comparateur officiel de
+  l'OFSP, prérempli avec les données du foyer.
+
+  Ouvrez l'URL renvoyée dans un navigateur : la comparaison doit s'afficher
+  avec la bonne commune, les bonnes années de naissance et les bonnes
+  franchises.
+
+  ## Ce qui est prérempli
+
+  | Paramètre priminfo | Origine |
+  |---|---|
+  | `location_id` | NPA + localité du premier assuré, résolus chez priminfo |
+  | `yob[i]` | année de naissance de chaque assuré |
+  | `franchise[i]` | franchise du contrat LAMal en vigueur, sinon défaut légal |
+  | `insurer` | prestataire du contrat LAMal de l'assuré de référence |
+  | `coverage[i]` | `employerAccidentCoverage` du contrat LAMal, **inversé** |
+  | `plan`, `models[]`, `display` | paramètres de la requête |
+
+  ## L'inversion de `coverage`
+
+  Chez priminfo, `coverage=1` signifie « couverture accident **incluse** dans la
+  LAMal », donc que l'employeur ne couvre pas. La conversion est donc inversée :
+
+  | `employerAccidentCoverage` du contrat | `coverage[i]` envoyé |
+  |---|---|
+  | `true` (employeur couvre) | `0` |
+  | `false` ou aucun contrat | `1` |
+
+  Le champ `coverageSource` de la réponse indique d'où vient chaque valeur :
+  `contrat`, `défaut`, ou `paramètre` si vous forcez `?coverage=`.
+
+  ## Le bloc `warnings`
+
+  À afficher dans l'application : il signale ce qui n'a pas pu être déduit et
+  que l'utilisateur devra vérifier — absence de contrat LAMal, NPA couvrant
+  plusieurs localités, franchise non conforme, caisse non reconnue, ou adresses
+  différentes au sein du foyer. Le lien reste utilisable dans tous les cas.
+
+  ## Paramètres
+
+  Tous désactivés par défaut (préfixe `~`), à cocher au besoin.
+
+  - `clientUid` — limite à certains assurés, répétable ou séparé par des virgules
+  - `lang` — `fr`, `de` ou `it`
+  - `coverage` — force la même valeur pour tous ; omis, elle vient de chaque contrat
+  - `display` — `savings`, `comparison` ou `change`
+  - `models` — parmi `BASE`, `HAM`, `HMO`, `DIV`
+  - `redirect=true` — renvoie une redirection 302 vers priminfo au lieu du JSON
+
+  Une valeur inconnue renvoie **400** avec la liste des valeurs acceptées.
+}

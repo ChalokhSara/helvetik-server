@@ -1,0 +1,33 @@
+meta {
+  name: 01 List clients
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/clients
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{authToken}}
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("ne renvoie que les clients du compte", function () {
+    expect(res.getBody().clients).to.be.an("array");
+  });
+}
+
+docs {
+  Liste les clients rattachés au compte authentifié, triés par date de naissance.
+
+  Le filtre sur `userUid` est appliqué côté serveur à partir du jeton : il n'y a
+  aucun paramètre permettant de lire les clients d'un autre compte. Pour le
+  vérifier, créez un second compte et comparez.
+}

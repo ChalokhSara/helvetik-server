@@ -1,0 +1,74 @@
+meta {
+  name: 03 LAMal models
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/api/comparison/lamal-models
+  body: none
+  auth: none
+}
+
+params:query {
+  ~provider: CSS
+  ~clientUid: {{clientUid}}
+}
+
+headers {
+  Authorization: Bearer {{authToken}}
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("des modèles sont proposés", function () {
+    expect(res.getBody().models.length).to.be.at.least(1);
+  });
+
+  test("chaque modèle porte son code et sa famille", function () {
+    res.getBody().models.forEach(function (m) {
+      expect(m.tariffCode).to.be.a("string");
+      expect(["BASE", "HAM", "HMO", "DIV"]).to.include(m.tariffType);
+      expect(m.label).to.be.a("string");
+    });
+  });
+
+  test("le modèle standard est proposé", function () {
+    const types = res.getBody().models.map(function (m) { return m.tariffType; });
+    expect(types).to.include("BASE");
+  });
+}
+
+docs {
+  Modèles LAMal proposés par une caisse dans la région du foyer, tels que
+  publiés au catalogue de l'OFSP.
+
+  Sert à faire choisir son modèle à l'assuré depuis l'application, et donc à
+  renseigner `tariffType` et `tariffCode` sur son contrat.
+
+  ## Pourquoi c'est utile
+
+  Sans modèle enregistré, la comparaison prend le **modèle standard** comme
+  référence. Pour un assuré déjà en HMO ou chez un médecin de famille, elle
+  surestime alors largement l'économie possible — le vrai gain se mesure par
+  rapport à ce qu'il paie réellement.
+
+  Effet mesuré sur le foyer de test, chez Atupri à Zurich :
+
+  | Référence | Prime | Économie affichée |
+  |---|---|---|
+  | Modèle standard (supposé) | 628.70 | 151.80 /mois |
+  | HMO (réel) | 499.40 | 22.50 /mois |
+  | Médecin de famille (réel) | 545.10 | 68.20 /mois |
+
+  ## Paramètres
+
+  - `provider` — nom de la caisse ; à défaut, celle du contrat LAMal en vigueur
+  - `clientUid` — assuré dont la région sert de cadre
+
+  Une caisse qui ne pratique pas la LAMal renvoie **400** `INSURER_NOT_FOUND`.
+  Sans données de primes en service, la route renvoie **404** `NO_PREMIUM_DATA`.
+}

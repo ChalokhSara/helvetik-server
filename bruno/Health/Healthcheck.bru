@@ -1,0 +1,26 @@
+meta {
+  name: Healthcheck
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/health
+  body: none
+  auth: none
+}
+
+tests {
+  test("répond 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+
+  test("service OK", function () {
+    expect(res.getBody().status).to.equal("OK");
+  });
+}
+
+docs {
+  Vérifie que le serveur répond. À lancer en premier : si cette requête échoue,
+  l'API n'est pas démarrée (`npm run dev` dans `api/`, ou `docker compose up`).
+}

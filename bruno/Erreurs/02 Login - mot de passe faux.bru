@@ -1,0 +1,40 @@
+meta {
+  name: 02 Login - mot de passe faux
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/auth/login
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "email": "{{userEmail}}",
+    "password": "mauvais-mot-de-passe"
+  }
+}
+
+tests {
+  test("répond 401", function () {
+    expect(res.getStatus()).to.equal(401);
+  });
+
+  test("message non énumérant", function () {
+    expect(res.getBody().code).to.equal("INVALID_CREDENTIALS");
+    expect(res.getBody().message).to.equal("Email ou mot de passe incorrect.");
+  });
+}
+
+docs {
+  Même réponse qu'avec un email inexistant : le message ne dit pas lequel des
+  deux est faux, pour ne pas permettre d'énumérer les comptes.
+
+  Essayez avec `"email": "inconnu@example.com"` — réponse strictement identique.
+}
