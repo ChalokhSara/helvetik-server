@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { Client, IClient } from '../models/client.model';
 import { User } from '../models/user.model';
 import { csrfToken } from '../utils/csrf';
+import { isFirstClientOfHousehold, PHONE_REQUIRED_MESSAGE } from '../services/household.service';
 import { buildBaseUrl, escapeRegex, PAGE_SIZE, parsePage } from '../utils/query';
 import {
   ClientFormValues,
@@ -53,7 +54,8 @@ function readFormValues(body: Record<string, unknown>): ClientFormValues {
     firstname: str('firstname'),
     birthdate: str('birthdate'),
     email: str('email').toLowerCase(),
-    phone: str('phone'),
+    // Champ facultatif : on enregistre son absence plutôt qu'une chaîne vide.
+    phone: str('phone') || undefined,
     road: str('road'),
     plz: str('plz'),
     location: str('location'),
@@ -179,6 +181,10 @@ router.post('/new', async (req: Request, res: Response) => {
   }
   if (!await User.exists({ uid: values.userUid })) {
     return fail('L\'utilisateur titulaire est introuvable.');
+  }
+  // Le premier assuré d'un compte en est le contact : son numéro est exigé.
+  if (!values.phone && await isFirstClientOfHousehold(values.userUid!)) {
+    return fail(PHONE_REQUIRED_MESSAGE);
   }
 
   try {

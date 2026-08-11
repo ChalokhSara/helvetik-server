@@ -12,10 +12,14 @@ docker compose up          # API + MongoDB + Mailpit
 
 | Service | Adresse |
 |---|---|
-| API | <http://localhost:3000> |
+| Site des assurés | <http://localhost:3000> |
+| API | <http://localhost:3000/api> |
 | Console admin | <http://localhost:3000/admin> |
 | Swagger | <http://localhost:3000/api-docs> |
 | Mailpit (boîte de réception) | <http://localhost:8025> |
+
+Le site web et l'API mobile servent les mêmes comptes et les mêmes données :
+le site s'authentifie par session cookie, l'API par jeton Bearer.
 
 Pour lancer l'API hors conteneur (`cd api && npm run dev`), gardez au moins
 MongoDB et Mailpit dans Docker : `docker compose up mongodb mailpit`. Les ports

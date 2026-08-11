@@ -1,18 +1,13 @@
 /**
  * Page de retour de confirmation d'email — ouverte dans un navigateur depuis
- * le lien reçu par email, donc rendue en HTML plutôt qu'en JSON.
+ * le lien reçu par email, donc rendue avec la mise en page du site des assurés
+ * et non celle de la console d'administration.
  */
 
-import { alertBlock, cardPage } from './layout';
+import { renderEmailConfirmation } from './site/pages';
 
 export function renderEmailConfirmationPage(
   options: { success: boolean; message: string }
 ): string {
-  const body = options.success
-    ? alertBlock(undefined, options.message)
-    : alertBlock(options.message);
-
-  return cardPage('Helvetik — Confirmation d\'email', `    <h1>Helvetik</h1>
-    <p class="subtitle">Confirmation d'adresse email</p>
-${body}`);
+  return renderEmailConfirmation(options);
 }

@@ -13,6 +13,7 @@ import { clientsRouter } from './routes/clients.routes';
 import { insurancesRouter } from './routes/insurances.routes';
 import { comparisonRouter } from './routes/comparison.routes';
 import { adminRouter } from './routes/admin.routes';
+import { siteRouter } from './routes/site.routes';
 import { healthcheckRouter } from './routes/healthcheck';
 
 dotenv.config();
@@ -56,6 +57,9 @@ app.use('/api/clients', clientsRouter);
 app.use('/api/insurances', insurancesRouter);
 app.use('/api/comparison', comparisonRouter);
 app.use('/admin', adminRouter);
+// Le site des assurés est monté en dernier : il occupe la racine et ne doit
+// masquer ni l'API, ni la console, ni la documentation.
+app.use('/', siteRouter);
 
 // Connexion MongoDB
 mongoose.connect(MONGODB_URI)

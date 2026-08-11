@@ -71,6 +71,33 @@ tests {
       });
     });
   });
+
+  test("la répartition individuelle est cohérente", function () {
+    const ind = res.getBody().individual;
+    if (ind === null) {
+      // Foyer d'un seul assuré : les deux calculs se confondent.
+      expect(res.getBody().insured.length).to.equal(1);
+      return;
+    }
+    const uids = res.getBody().insured.map(function (i) { return i.clientUid; });
+    expect(ind.plans.length).to.equal(uids.length);
+    ind.plans.forEach(function (p) { expect(uids).to.include(p.clientUid); });
+
+    const sum = ind.plans.reduce(function (t, p) { return t + p.best.monthly.total; }, 0);
+    expect(Math.abs(sum - ind.monthly.total)).to.be.below(0.02);
+    expect(Math.abs(ind.monthly.total * 12 - ind.yearly.total)).to.be.below(0.05);
+    expect(ind.insurerCount).to.be.at.least(1);
+  });
+
+  test("l'individuel ne peut pas être plus cher que le groupé", function () {
+    const ind = res.getBody().individual;
+    if (ind === null) { return; }
+    // Le classement groupé impose une seule caisse à tout le foyer : cette
+    // contrainte ne peut qu'écarter des options, jamais en ajouter.
+    expect(ind.monthly.total).to.be.at.most(res.getBody().best.monthly.total + 0.02);
+    expect(ind.extraSavings.monthly).to.be.at.least(0);
+    expect(ind.savings.monthly).to.be.at.least(res.getBody().potentialSavings.monthly - 0.02);
+  });
 }
 
 docs {

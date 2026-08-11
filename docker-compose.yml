@@ -19,6 +19,13 @@ services:
       - TZ=Europe/Zurich
       - PREMIUM_SYNC_ENABLED=true
       - PREMIUM_SYNC_CRON=0 4 1 * *
+      - OCR_LANGUAGES=fra+deu
+      - TESSERACT_CACHE_PATH=/app/.tessdata
+    volumes:
+      # Les données de langue de la reconnaissance de texte sont téléchargées
+      # au premier usage : les conserver évite de les retélécharger à chaque
+      # recréation du conteneur.
+      - tessdata:/app/.tessdata
     depends_on:
       - mongodb
       - mailpit
@@ -51,6 +58,7 @@ services:
 
 volumes:
   mongodb_data:
+  tessdata:
 
 networks:
   app-network:

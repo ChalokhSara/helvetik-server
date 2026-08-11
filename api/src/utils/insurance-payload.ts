@@ -36,6 +36,43 @@ export interface InsurancePayloadResult {
   error?: string;
 }
 
+/**
+ * Règles propres à l'assurance de base, imposées par la LAMal et non
+ * négociables : le contrat court sur l'année civile et s'achève au 31 décembre,
+ * il se reconduit tacitement, et le préavis de résiliation ordinaire est d'un
+ * mois — la résiliation doit donc parvenir à la caisse pour le 30 novembre.
+ *
+ * Ces valeurs sont calculées plutôt que saisies : les demander à l'assuré,
+ * c'est l'exposer à se tromper sur des dates qui ne dépendent pas de lui.
+ */
+export function applyLamalRules<T extends {
+  type?: string;
+  startDate?: Date;
+  endDate?: Date;
+  cancellationNoticeMonths?: number;
+  autoRenew?: boolean;
+}>(values: T, now = new Date()): T {
+  if (values.type !== 'LAMAL') {
+    return values;
+  }
+
+  // Période en cours : l'année civile courante, ou celle du début pour un
+  // contrat qui ne prend effet que plus tard.
+  const startYear = values.startDate?.getUTCFullYear() ?? now.getUTCFullYear();
+  const year = Math.max(startYear, now.getUTCFullYear());
+
+  values.endDate = new Date(Date.UTC(year, 11, 31));
+  values.cancellationNoticeMonths = 1;
+  values.autoRenew = true;
+  return values;
+}
+
+/** Terme de la période LAMal en cours, pour l'afficher dans les formulaires. */
+export function lamalPeriodEnd(startDate?: Date, now = new Date()): Date {
+  const startYear = startDate?.getUTCFullYear() ?? now.getUTCFullYear();
+  return new Date(Date.UTC(Math.max(startYear, now.getUTCFullYear()), 11, 31));
+}
+
 /** Nombre optionnel : absent reste absent, une saisie non numérique est une erreur. */
 function readNumber(raw: unknown, label: string): { value?: number; error?: string } {
   if (raw === undefined || raw === null || raw === '') {
@@ -62,13 +99,22 @@ export function readInsurancePayload(body: unknown): InsurancePayloadResult {
     return { error: 'La date de début est invalide.' };
   }
 
+  const type = str('type').toUpperCase();
+  const isLamal = type === 'LAMAL';
+
+  // Pour la LAMal, le terme est imposé par la loi : il n'est ni demandé ni lu.
   const rawEnd = str('endDate');
-  if (!rawEnd) {
-    return { error: 'La date de fin est obligatoire.' };
-  }
-  const endDate = new Date(rawEnd);
-  if (Number.isNaN(endDate.getTime())) {
-    return { error: 'La date de fin est invalide.' };
+  let endDate: Date;
+  if (isLamal) {
+    endDate = lamalPeriodEnd(startDate);
+  } else {
+    if (!rawEnd) {
+      return { error: 'La date de fin est obligatoire.' };
+    }
+    endDate = new Date(rawEnd);
+    if (Number.isNaN(endDate.getTime())) {
+      return { error: 'La date de fin est invalide.' };
+    }
   }
 
   const numbers = {
@@ -83,32 +129,37 @@ export function readInsurancePayload(body: unknown): InsurancePayloadResult {
     return { error: numberError };
   }
 
-  return {
-    values: {
-      clientUid: str('clientUid'),
-      provider: str('provider'),
-      productName: str('productName'),
-      type: str('type').toUpperCase(),
-      description: str('description') || undefined,
-      policyNumber: str('policyNumber'),
-      startDate,
-      endDate,
-      status: str('status').toUpperCase() || undefined,
-      premiumAmount: numbers.premiumAmount.value,
-      premiumFrequency: str('premiumFrequency').toUpperCase() || undefined,
-      currency: str('currency').toUpperCase() || undefined,
-      franchise: numbers.franchise.value,
-      coverageAmount: numbers.coverageAmount.value,
-      cancellationNoticeMonths: numbers.cancellationNoticeMonths.value,
-      autoRenew: source.autoRenew === undefined ? undefined : Boolean(source.autoRenew),
-      employerAccidentCoverage: source.employerAccidentCoverage === undefined
-        ? undefined
-        : Boolean(source.employerAccidentCoverage),
-      tariffType: str('tariffType').toUpperCase() || undefined,
-      tariffCode: str('tariffCode') || undefined,
-      notes: str('notes') || undefined
-    }
+  const values: InsurancePayload = {
+    clientUid: str('clientUid'),
+    provider: str('provider'),
+    productName: str('productName'),
+    type,
+    description: str('description') || undefined,
+    policyNumber: str('policyNumber'),
+    startDate,
+    endDate,
+    status: str('status').toUpperCase() || undefined,
+    premiumAmount: numbers.premiumAmount.value,
+    premiumFrequency: str('premiumFrequency').toUpperCase() || undefined,
+    // Le franc est la seule devise en jeu et le formulaire du site ne la
+    // demande pas. Sans valeur par défaut ici, une modification effacerait un
+    // champ obligatoire et l'enregistrement échouerait.
+    currency: str('currency').toUpperCase() || 'CHF',
+    franchise: numbers.franchise.value,
+    // La somme assurée n'a pas de sens pour une assurance de base.
+    coverageAmount: isLamal ? undefined : numbers.coverageAmount.value,
+    cancellationNoticeMonths: numbers.cancellationNoticeMonths.value,
+    autoRenew: source.autoRenew === undefined ? undefined : Boolean(source.autoRenew),
+    // Modèle et couverture accident ne concernent que la LAMal.
+    employerAccidentCoverage: isLamal
+      ? Boolean(source.employerAccidentCoverage)
+      : undefined,
+    tariffType: isLamal ? (str('tariffType').toUpperCase() || undefined) : undefined,
+    tariffCode: isLamal ? (str('tariffCode') || undefined) : undefined,
+    notes: str('notes') || undefined
   };
+
+  return { values: applyLamalRules(values) };
 }
 
 /** Prime ramenée au mois, pour additionner des contrats de périodicités différentes. */

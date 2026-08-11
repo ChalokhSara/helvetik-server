@@ -17,7 +17,8 @@ export interface IClient extends Document {
   firstname: string;
   birthdate: Date;
   email: string;
-  phone: string;
+  /** Facultatif : exigé seulement pour le titulaire du compte. */
+  phone?: string;
   road: string;
   plz: string;
   location: string;
@@ -63,9 +64,12 @@ const clientSchema = new Schema<IClient>({
     lowercase: true,
     trim: true
   },
+  // Facultatif : un enfant ou un conjoint rattaché au compte n'a pas
+  // forcément de numéro propre. Il n'est exigé qu'à la création du compte,
+  // où il devient le contact du titulaire — la règle est portée par les
+  // routes d'inscription, le modèle ne peut pas distinguer ce cas.
   phone: {
     type: String,
-    required: [true, 'Le téléphone est obligatoire.'],
     trim: true
   },
   road: {

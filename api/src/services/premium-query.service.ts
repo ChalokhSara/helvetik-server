@@ -73,6 +73,19 @@ export interface ComputeResult {
   redistributionYearly: number;
   offers: ComputedOffer[];
   current: ComputedOffer | null;
+  /**
+   * Comment le contrat de référence a été identifié. `FALLBACK_BASE` signale
+   * que le modèle enregistré n'a pas été reconnu : l'économie affichée est
+   * alors calculée par rapport au modèle standard, donc surestimée.
+   */
+  currentMatch: 'EXACT' | 'FALLBACK_BASE' | 'NONE';
+}
+
+/** Compare deux libellés de modèle sans se laisser arrêter par la ponctuation. */
+function sameTariff(a: string, b: string): boolean {
+  const key = (value: string) =>
+    value.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return key(a) === key(b) && key(a).length > 0;
 }
 
 function round(value: number): number {
@@ -129,19 +142,38 @@ export async function resolveInsurerByName(
   const normalize = (value: string) =>
     value.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 
-  const exact = insurers.find((i) => normalize(i.name) === wanted);
-  if (exact) {
-    return { insurerId: exact.insurerId, name: exact.name };
-  }
+  /**
+   * Classement par qualité de correspondance.
+   *
+   * Le simple « contient » ne suffit pas : « Mutuel » est contenu aussi bien
+   * dans « Mutuel Krankenversicherung AG » que dans « Mutuelle Neuchâteloise »,
+   * et retenir le nom le plus court désignerait la mauvaise caisse. Une
+   * correspondance sur un mot entier prime donc sur une correspondance partielle.
+   */
+  const startsWithWord = (haystack: string, needle: string) =>
+    haystack.startsWith(needle) &&
+    (haystack.length === needle.length || /[\s\-.]/.test(haystack[needle.length]));
 
-  // « Atupri » doit retrouver « Atupri Gesundheitsversicherung AG ».
-  const partial = insurers.filter((i) =>
-    normalize(i.name).includes(wanted) || wanted.includes(normalize(i.name)));
-  if (!partial.length) {
+  const score = (name: string): number => {
+    const value = normalize(name);
+    if (value === wanted) return 4;
+    if (startsWithWord(value, wanted)) return 3;
+    if (startsWithWord(wanted, value)) return 2;
+    if (value.includes(wanted) || wanted.includes(value)) return 1;
+    return 0;
+  };
+
+  const ranked = insurers
+    .map((insurer) => ({ insurer, score: score(insurer.name) }))
+    .filter((candidate) => candidate.score > 0)
+    // À qualité égale, le nom le plus court est le plus générique.
+    .sort((a, b) => b.score - a.score || a.insurer.name.length - b.insurer.name.length);
+
+  if (!ranked.length) {
     return null;
   }
 
-  const best = partial.sort((a, b) => a.name.length - b.name.length)[0];
+  const best = ranked[0].insurer;
   return { insurerId: best.insurerId, name: best.name };
 }
 
@@ -223,7 +255,13 @@ export async function computeOffers(input: ComputeInput): Promise<ComputeResult 
   }
 
   if (!perPerson.length || perPerson.some((m) => m.size === 0)) {
-    return { year: year.year, redistributionYearly: year.redistributionYearly, offers: [], current: null };
+    return {
+      year: year.year,
+      redistributionYearly: year.redistributionYearly,
+      offers: [],
+      current: null,
+      currentMatch: 'NONE'
+    };
   }
 
   const names = new Map(
@@ -292,16 +330,31 @@ export async function computeOffers(input: ComputeInput): Promise<ComputeResult 
   // modèle, ce qui minimiserait l'économie affichée. C'est aussi la convention
   // de priminfo lorsqu'on ne lui indique qu'une caisse.
   let current: ComputedOffer | null = null;
+  let currentMatch: ComputeResult['currentMatch'] = 'NONE';
+
   if (input.current) {
     const sameInsurer = offers.filter((o) => o.insurerId === input.current!.insurerId);
+    const wanted = input.current.tariffCode;
 
-    if (input.current.tariffCode) {
-      current = sameInsurer.find((o) => o.tariffCode === input.current!.tariffCode) || null;
+    if (wanted) {
+      // Le code du catalogue (« KPTwindoc ») et son libellé commercial
+      // (« KPTwin.doc ») désignent le même modèle : l'assuré saisit l'un ou
+      // l'autre, la comparaison doit reconnaître les deux.
+      current = sameInsurer.find((o) =>
+        sameTariff(o.tariffCode, wanted) || (o.tariffName ? sameTariff(o.tariffName, wanted) : false)
+      ) || null;
+      if (current) {
+        currentMatch = 'EXACT';
+      }
     }
+
     if (!current) {
       current = sameInsurer.find((o) => o.tariffType === 'BASE')
         || sameInsurer[sameInsurer.length - 1]
         || null;
+      if (current) {
+        currentMatch = 'FALLBACK_BASE';
+      }
     }
   }
 
@@ -312,5 +365,11 @@ export async function computeOffers(input: ComputeInput): Promise<ComputeResult 
     }
   }
 
-  return { year: year.year, redistributionYearly: year.redistributionYearly, offers, current };
+  return {
+    year: year.year,
+    redistributionYearly: year.redistributionYearly,
+    offers,
+    current,
+    currentMatch
+  };
 }

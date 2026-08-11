@@ -8,6 +8,7 @@ import { sendConfirmationEmail } from '../utils/mailer';
 import { describeApiError } from '../utils/errors';
 import { readClientPayload, serializeClient } from '../utils/client-payload';
 import { requireUser } from '../middleware/require-user';
+import { PHONE_REQUIRED_MESSAGE } from '../services/household.service';
 import { renderEmailConfirmationPage } from '../views/email-confirmation.view';
 
 const router = Router();
@@ -100,6 +101,15 @@ router.post('/register', async (req: Request, res: Response) => {
   const payload = readClientPayload(req.body?.client, { email });
   if (payload.error || !payload.values) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: payload.error });
+  }
+
+  // Facultatif pour les membres ajoutés ensuite, mais exigé du titulaire :
+  // c'est le contact du compte. Le modèle ne peut pas distinguer les deux cas.
+  if (!payload.values.phone) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: PHONE_REQUIRED_MESSAGE
+    });
   }
 
   if (await User.exists({ email })) {

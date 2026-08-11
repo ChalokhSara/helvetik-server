@@ -12,7 +12,7 @@ export interface ClientPayload {
   firstname: string;
   birthdate: Date;
   email: string;
-  phone: string;
+  phone?: string;
   road: string;
   plz: string;
   location: string;
@@ -57,7 +57,7 @@ export function readClientPayload(
       firstname: str('firstname'),
       birthdate,
       email: (str('email') || defaults.email || '').toLowerCase(),
-      phone: str('phone'),
+      phone: str('phone') || undefined,
       road: str('road'),
       plz: str('plz'),
       location: str('location'),

@@ -3,6 +3,7 @@ import { Client } from '../models/client.model';
 import { describeApiError } from '../utils/errors';
 import { readClientPayload, serializeClient } from '../utils/client-payload';
 import { requireUser } from '../middleware/require-user';
+import { PHONE_REQUIRED_MESSAGE } from '../services/household.service';
 
 const router = Router();
 
@@ -79,6 +80,13 @@ router.post('/', async (req: Request, res: Response) => {
 
   try {
     const count = await Client.countDocuments({ userUid: user.uid });
+    // Le premier assuré du compte en est le contact : son numéro est exigé.
+    if (!payload.values.phone && count === 0) {
+      return res.status(400).json({
+        code: 'VALIDATION_ERROR',
+        message: PHONE_REQUIRED_MESSAGE
+      });
+    }
     if (count >= MAX_CLIENTS_PER_USER) {
       return res.status(409).json({
         code: 'TOO_MANY_CLIENTS',

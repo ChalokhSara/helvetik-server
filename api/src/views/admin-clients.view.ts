@@ -168,10 +168,11 @@ export function renderClientFormPage(options: ClientFormOptions): string {
   const text = (
     id: keyof ClientFormValues,
     label: string,
-    attrs = ''
+    attrs = '',
+    required = true
   ) => `      <div>
         <label for="${id}">${escapeHtml(label)}</label>
-        <input id="${id}" name="${id}" value="${escapeHtml(String(v[id] ?? ''))}" ${attrs} required>
+        <input id="${id}" name="${id}" value="${escapeHtml(String(v[id] ?? ''))}" ${attrs}${required ? ' required' : ''}>
       </div>`;
 
   const options_ = (list: Array<{ value: string; label: string }>, selected?: string) =>
@@ -219,7 +220,7 @@ ${text('avsNum', 'N° AVS', 'type="text" placeholder="756.1234.5678.90" pattern=
         <legend>Contact</legend>
         <div class="grid">
 ${text('email', 'Email', 'type="email"')}
-${text('phone', 'Téléphone', 'type="tel"')}
+${text('phone', 'Téléphone (facultatif)', 'type="tel"', false)}
         </div>
 ${text('road', 'Rue et numéro', 'type="text"')}
         <div class="grid">
