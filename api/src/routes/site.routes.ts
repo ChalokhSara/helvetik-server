@@ -9,6 +9,8 @@ import { Feedback, INTEREST_LEVELS, InterestLevel } from '../models/feedback.mod
 import { generateSalt, hashPassword, verifyPassword } from '../utils/password';
 import { generateToken, hashToken } from '../utils/token';
 import { sendConfirmationEmail } from '../utils/mailer';
+import { resolveBaseUrl } from '../utils/base-url';
+import { emailConfirmationRequired } from '../config/features';
 import { csrfToken, verifyCsrf, isCsrfValid, CSRF_REJECTION_MESSAGE } from '../utils/csrf';
 import {
   describeExtraction,
@@ -165,7 +167,8 @@ router.get('/connexion', async (req: Request, res: Response) => {
   }
   const notices: Record<string, string> = {
     deconnecte: 'Vous êtes déconnecté.',
-    confirme: 'Adresse confirmée : vous pouvez vous connecter.'
+    confirme: 'Adresse confirmée : vous pouvez vous connecter.',
+    cree: 'Compte créé. Connectez-vous pour accéder à votre espace.'
   };
   res.type('html').send(views.renderLogin({
     csrf: csrfToken(req),
@@ -191,9 +194,10 @@ router.post('/connexion', async (req: Request, res: Response) => {
     if (user.blocked) {
       return fail('Ce compte est bloqué. Contactez-nous.', 403);
     }
-    if (!user.emailVerified) {
-      return fail('Confirmez votre adresse email avant de vous connecter. ' +
-        'Le lien vous a été envoyé lors de votre inscription.', 403);
+    // Barrière levée quand la confirmation n'est pas exigée (cf. config/features).
+    if (emailConfirmationRequired() && !user.emailVerified) {
+      return fail('Confirmez votre adresse email avant de vous connecter. Le lien vous a été ' +
+        'envoyé lors de votre inscription — pensez à regarder dans vos courriers indésirables.', 403);
     }
 
     // Régénérer la session à la connexion coupe court à toute fixation de session.
@@ -264,12 +268,21 @@ router.post('/inscription', async (req: Request, res: Response) => {
     return fail('Un compte existe déjà avec cette adresse.', 409);
   }
 
+  const confirmationRequired = emailConfirmationRequired();
+
   try {
     const salt = generateSalt();
     const user = new User({ email: accountEmail, salt, password: await hashPassword(password, salt) });
-    const token = generateToken();
-    user.emailTokenHash = hashToken(token);
-    user.emailTokenExpiresAt = new Date(Date.now() + EMAIL_TOKEN_TTL_MS);
+
+    let token: string | undefined;
+    if (confirmationRequired) {
+      token = generateToken();
+      user.emailTokenHash = hashToken(token);
+      user.emailTokenExpiresAt = new Date(Date.now() + EMAIL_TOKEN_TTL_MS);
+    } else {
+      user.emailVerified = true;
+      user.emailVerifiedAt = new Date();
+    }
     await user.save();
 
     // Pas de transaction : si le client échoue, l'utilisateur est retiré pour
@@ -281,8 +294,24 @@ router.post('/inscription', async (req: Request, res: Response) => {
       throw clientErr;
     }
 
-    const emailSent = await sendConfirmationEmail(user.email, token);
-    res.type('html').send(views.renderRegistered(user.email, emailSent));
+    if (token) {
+      const emailSent = await sendConfirmationEmail(user.email, token, resolveBaseUrl(req));
+      return res.type('html').send(views.renderRegistered(user.email, emailSent));
+    }
+
+    // Sans confirmation à faire, retourner l'utilisateur à la page de connexion
+    // pour retaper son mot de passe n'aurait aucun sens : on ouvre la session.
+    req.session.regenerate((err) => {
+      if (err) {
+        console.error('Erreur de session après inscription:', err);
+        return res.redirect('/connexion?msg=cree');
+      }
+      req.session.siteUserUid = user.uid;
+      user.lastLoginDate = new Date();
+      user.save()
+        .then(() => res.redirect('/espace?msg=bienvenue'))
+        .catch(() => res.redirect('/espace?msg=bienvenue'));
+    });
   } catch (err) {
     console.error('Erreur d\'inscription (site):', err);
     { const d = describe(err); fail(d.message, 400, d.fields); }
@@ -340,7 +369,10 @@ router.get('/espace', async (req: Request, res: Response) => {
           }
         : undefined,
       savings,
-      notice: String(req.query.msg || '') === 'ok' ? 'Modifications enregistrées.' : undefined
+      notice: ({
+        ok: 'Modifications enregistrées.',
+        bienvenue: 'Bienvenue ! Votre compte est prêt : commencez par ajouter votre assurance de base.'
+      } as Record<string, string>)[String(req.query.msg || '')]
     }));
   } catch (err) {
     console.error('Erreur du tableau de bord:', err);

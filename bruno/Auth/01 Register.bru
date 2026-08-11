@@ -36,6 +36,9 @@ body:json {
 
 script:post-response {
   if (res.getStatus() === 201) {
+    // La confirmation d'email peut être désactivée (EMAIL_CONFIRMATION_REQUIRED) :
+    // les deux requêtes suivantes s'effacent alors d'elles-mêmes.
+    bru.setEnvVar("confirmationRequired", String(res.getBody().emailConfirmationRequired !== false));
     bru.setEnvVar("userUid", res.getBody().user.uid);
   }
 }
@@ -45,8 +48,11 @@ tests {
     expect(res.getStatus()).to.equal(201);
   });
 
-  test("email pas encore confirmé", function () {
-    expect(res.getBody().user.emailVerified).to.equal(false);
+  test("état de confirmation cohérent avec la configuration", function () {
+    // Confirmation exigée : le compte attend la validation du lien.
+    // Confirmation désactivée : il est actif immédiatement.
+    const attendue = res.getBody().emailConfirmationRequired !== false;
+    expect(res.getBody().user.emailVerified).to.equal(!attendue);
   });
 
   test("ne renvoie ni mot de passe ni salt", function () {

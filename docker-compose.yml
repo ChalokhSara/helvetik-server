@@ -1,26 +1,30 @@
+# Socle commun aux deux environnements.
+#
+#   développement : docker compose up -d
+#                   (docker-compose.override.yml est appliqué automatiquement :
+#                    Mailpit, emails capturés, ports ouverts)
+#
+#   production    : docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#                   (SMTP réel, secrets lus dans le fichier .env de la racine)
+#
+# Les valeurs sensibles ne figurent jamais ici : elles viennent de l'environnement.
+
 services:
-  # Service API
   api:
     build: ./api
-    ports:
-      - "3000:3000"
+    restart: unless-stopped
     environment:
       - MONGODB_URI=mongodb://mongodb:27017/insurance-app
-      - NODE_ENV=development
-      - SESSION_SECRET=dev-only-secret
-      - ROOT_ADMIN_EMAIL=root@helvetik.local
-      - APP_BASE_URL=http://localhost:3000
-      - SMTP_HOST=mailpit
-      - SMTP_PORT=1025
-      - MAIL_FROM=Helvetik <no-reply@helvetik.local>
-      - NOTIFICATIONS_ENABLED=true
-      - NOTIFICATIONS_CRON=0 8 * * *
-      - NOTIFICATIONS_RUN_ON_START=false
-      - TZ=Europe/Zurich
-      - PREMIUM_SYNC_ENABLED=true
-      - PREMIUM_SYNC_CRON=0 4 1 * *
-      - OCR_LANGUAGES=fra+deu
+      - TZ=${TZ:-Europe/Zurich}
+      - ROOT_ADMIN_EMAIL=${ROOT_ADMIN_EMAIL:-root@helvetik.local}
+      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-true}
+      - NOTIFICATIONS_CRON=${NOTIFICATIONS_CRON:-0 8 * * *}
+      - NOTIFICATIONS_RUN_ON_START=${NOTIFICATIONS_RUN_ON_START:-false}
+      - PREMIUM_SYNC_ENABLED=${PREMIUM_SYNC_ENABLED:-true}
+      - PREMIUM_SYNC_CRON=${PREMIUM_SYNC_CRON:-0 4 1 * *}
+      - OCR_LANGUAGES=${OCR_LANGUAGES:-fra+deu}
       - TESSERACT_CACHE_PATH=/app/.tessdata
+      - MAIL_FROM=${MAIL_FROM:-Helvetik <no-reply@helvetik.local>}
     volumes:
       # Les données de langue de la reconnaissance de texte sont téléchargées
       # au premier usage : les conserver évite de les retélécharger à chaque
@@ -28,31 +32,14 @@ services:
       - tessdata:/app/.tessdata
     depends_on:
       - mongodb
-      - mailpit
     networks:
       - app-network
 
-  # Base de données MongoDB
   mongodb:
     image: mongo:latest
-    ports:
-      - "27017:27017"
+    restart: unless-stopped
     volumes:
       - mongodb_data:/data/db
-    networks:
-      - app-network
-
-  # Serveur SMTP de développement : capture tous les emails sans jamais les
-  # transmettre à l'extérieur. Interface web sur http://localhost:8025
-  mailpit:
-    image: axllent/mailpit:latest
-    ports:
-      - "1025:1025"  # SMTP
-      - "8025:8025"  # interface web + API REST
-    environment:
-      - MP_MAX_MESSAGES=500
-      - MP_SMTP_AUTH_ACCEPT_ANY=1
-      - MP_SMTP_AUTH_ALLOW_INSECURE=1
     networks:
       - app-network
 

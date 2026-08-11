@@ -33,10 +33,29 @@ function getTransporter(): Transporter | null {
     return null;
   }
 
+  /**
+   * Le relais interne (conteneur Postfix sur le réseau Docker) annonce
+   * STARTTLS avec un certificat auto-signé, que nodemailer refuse : la
+   * connexion se ferme et rien ne part. Sur un réseau Docker privé, le trafic
+   * ne quitte pas la machine, on renonce donc à STARTTLS.
+   *
+   * Vers un relais accessible par Internet, ce réglage doit rester à `false` :
+   * sans TLS, identifiants et messages circuleraient en clair.
+   */
+  const ignoreTLS = process.env.SMTP_IGNORE_TLS === 'true';
+  const looksInternal = /^(mailer|mailpit|localhost|127\.0\.0\.1|smtp)$/i.test(host);
+  if (ignoreTLS && !looksInternal) {
+    console.warn(
+      `[mail] SMTP_IGNORE_TLS est actif alors que le relais « ${host} » semble externe : ` +
+      'les identifiants et les messages circuleraient en clair. Passez SMTP_IGNORE_TLS à false.'
+    );
+  }
+
   transporter = nodemailer.createTransport({
     host,
     port: Number(process.env.SMTP_PORT || 1025),
     secure: process.env.SMTP_SECURE === 'true',
+    ignoreTLS,
     // Mailpit accepte les connexions anonymes ; un relais réel exige des identifiants.
     auth: process.env.SMTP_USER
       ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD || '' }
@@ -83,12 +102,8 @@ export async function sendMail(message: MailMessage): Promise<boolean> {
   }
 }
 
-function appBaseUrl(): string {
-  return process.env.APP_BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-}
-
-export function confirmationUrl(token: string): string {
-  return `${appBaseUrl()}/api/auth/confirm-email?token=${token}`;
+export function confirmationUrl(token: string, baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}/api/auth/confirm-email?token=${token}`;
 }
 
 export interface CancellationReminder {
@@ -139,8 +154,16 @@ export async function sendCancellationReminder(reminder: CancellationReminder): 
   });
 }
 
-export async function sendConfirmationEmail(to: string, token: string): Promise<boolean> {
-  const url = confirmationUrl(token);
+/**
+ * `baseUrl` provient de la requête à l'origine de l'envoi (cf. utils/base-url),
+ * pour que le lien pointe vers l'adresse par laquelle l'utilisateur est arrivé.
+ */
+export async function sendConfirmationEmail(
+  to: string,
+  token: string,
+  baseUrl: string
+): Promise<boolean> {
+  const url = confirmationUrl(token, baseUrl);
 
   return sendMail({
     to,

@@ -14,6 +14,7 @@ import { adminUsersRouter } from './admin-users.routes';
 import { adminClientsRouter } from './admin-clients.routes';
 import { adminInsurancesRouter } from './admin-insurances.routes';
 import { adminPremiumsRouter } from './admin-premiums.routes';
+import { adminSettingsRouter } from './admin-settings.routes';
 
 const router = Router();
 
@@ -187,5 +188,6 @@ router.use('/users', requireAdmin, adminUsersRouter);
 router.use('/clients', requireAdmin, adminClientsRouter);
 router.use('/insurances', requireAdmin, adminInsurancesRouter);
 router.use('/premiums', requireAdmin, adminPremiumsRouter);
+router.use('/settings', requireAdmin, adminSettingsRouter);
 
 export { router as adminRouter };

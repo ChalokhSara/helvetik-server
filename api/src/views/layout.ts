@@ -240,7 +240,7 @@ ${body}
 export interface ConsoleContext {
   username: string;
   /** Onglet de navigation à marquer actif. */
-  active?: 'dashboard' | 'users' | 'clients' | 'insurances' | 'premiums';
+  active?: 'dashboard' | 'users' | 'clients' | 'insurances' | 'premiums' | 'settings';
 }
 
 /**
@@ -271,6 +271,7 @@ export function consolePage(title: string, ctx: ConsoleContext, body: string): s
     ${tab('/admin/clients', 'Clients', 'clients')}
     ${tab('/admin/insurances', 'Assurances', 'insurances')}
     ${tab('/admin/premiums', 'Primes officielles', 'premiums')}
+    ${tab('/admin/settings', 'Réglages', 'settings')}
   </nav>
   <main>
 ${body}

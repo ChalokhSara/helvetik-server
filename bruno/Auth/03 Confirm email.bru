@@ -14,6 +14,14 @@ params:query {
   token: {{confirmToken}}
 }
 
+script:pre-request {
+  // Sans confirmation exigée, aucun email n'est envoyé et le compte est déjà
+  // actif : cette étape n'a pas lieu d'être.
+  if (bru.getEnvVar("confirmationRequired") === "false") {
+    bru.runner.skipRequest();
+  }
+}
+
 tests {
   test("répond 200", function () {
     expect(res.getStatus()).to.equal(200);

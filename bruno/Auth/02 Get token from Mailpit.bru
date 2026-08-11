@@ -22,6 +22,14 @@ script:post-response {
   }
 }
 
+script:pre-request {
+  // Sans confirmation exigée, aucun email n'est envoyé et le compte est déjà
+  // actif : cette étape n'a pas lieu d'être.
+  if (bru.getEnvVar("confirmationRequired") === "false") {
+    bru.runner.skipRequest();
+  }
+}
+
 tests {
   test("un email est arrivé", function () {
     expect(res.getStatus()).to.equal(200);

@@ -59,10 +59,21 @@ en ligne de commande :
 cd bruno && npx @usebruno/cli run --env Local
 ```
 
-Sur une base vierge, les 22 requêtes et 61 tests doivent passer.
+Sur une base vierge, les 22 requêtes et 63 tests doivent passer.
 
 `Logout` est isolé dans le dossier `Session`, ordonné en dernier : au milieu du
 flux, il invalidait `authToken` et faisait échouer en 401 tout ce qui suivait.
+
+## Confirmation d'email désactivée
+
+Le réglage se pilote depuis la console : **Réglages → Confirmation d'adresse
+email**. La variable `EMAIL_CONFIRMATION_REQUIRED` ne donne plus que la valeur
+initiale, avant qu'un administrateur ne tranche.
+
+Désactivée, la confirmation rend les comptes actifs dès l'inscription.
+La collection s'y adapte : `02 Get token from Mailpit` et `03 Confirm email`
+se sautent d'elles-mêmes, et le décompte affiche « 2 skipped ». Toute la
+mécanique de confirmation reste testable en réactivant le réglage.
 
 ## Comment le jeton de confirmation est récupéré
 

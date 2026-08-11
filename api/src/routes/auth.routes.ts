@@ -5,6 +5,8 @@ import { UserToken, USER_TOKEN_TTL_SECONDS } from '../models/user-token.model';
 import { generateSalt, hashPassword, verifyPassword } from '../utils/password';
 import { generateToken, hashToken } from '../utils/token';
 import { sendConfirmationEmail } from '../utils/mailer';
+import { resolveBaseUrl } from '../utils/base-url';
+import { emailConfirmationRequired } from '../config/features';
 import { describeApiError } from '../utils/errors';
 import { readClientPayload, serializeClient } from '../utils/client-payload';
 import { requireUser } from '../middleware/require-user';
@@ -116,11 +118,20 @@ router.post('/register', async (req: Request, res: Response) => {
     return res.status(409).json({ code: 'EMAIL_TAKEN', message: 'Cet email est déjà utilisé.' });
   }
 
+  const confirmationRequired = emailConfirmationRequired();
+
   let user: IUser | null = null;
   try {
     const salt = generateSalt();
     user = new User({ email, salt, password: await hashPassword(password, salt) });
-    const emailToken = issueEmailToken(user);
+
+    // Le jeton n'est émis que si la confirmation est exigée : inutile
+    // d'encombrer le compte d'un jeton que personne n'utilisera.
+    const emailToken = confirmationRequired ? issueEmailToken(user) : undefined;
+    if (!confirmationRequired) {
+      user.emailVerified = true;
+      user.emailVerifiedAt = new Date();
+    }
     await user.save();
 
     // Pas de transaction : Mongo n'est pas forcément en replica set. En cas
@@ -135,11 +146,16 @@ router.post('/register', async (req: Request, res: Response) => {
 
     // Un envoi raté ne remet pas en cause l'inscription : le compte existe,
     // l'utilisateur peut demander un renvoi via /resend-confirmation.
-    const emailSent = await sendConfirmationEmail(user.email, emailToken);
+    const emailSent = emailToken
+      ? await sendConfirmationEmail(user.email, emailToken, resolveBaseUrl(req))
+      : false;
 
     res.status(201).json({
-      message: 'Compte créé. Confirmez votre email pour vous connecter.',
+      message: confirmationRequired
+        ? 'Compte créé. Confirmez votre email pour vous connecter.'
+        : 'Compte créé. Vous pouvez vous connecter immédiatement.',
       emailSent,
+      emailConfirmationRequired: confirmationRequired,
       user: serializeUser(user)
     });
   } catch (err) {
@@ -230,7 +246,7 @@ router.post('/resend-confirmation', async (req: Request, res: Response) => {
     if (user && !user.emailVerified && !user.blocked) {
       const token = issueEmailToken(user);
       await user.save();
-      await sendConfirmationEmail(user.email, token);
+      await sendConfirmationEmail(user.email, token, resolveBaseUrl(req));
     }
     generic();
   } catch (err) {
@@ -282,7 +298,10 @@ router.post('/login', async (req: Request, res: Response) => {
     if (user.blocked) {
       return res.status(403).json({ code: 'ACCOUNT_BLOCKED', message: 'Ce compte est bloqué.' });
     }
-    if (!user.emailVerified) {
+    // Barrière levée quand la confirmation n'est pas exigée : les comptes
+    // créés alors sont marqués confirmés d'office, mais un compte plus ancien
+    // resté non confirmé doit pouvoir se connecter lui aussi.
+    if (emailConfirmationRequired() && !user.emailVerified) {
       return res.status(403).json({
         code: 'EMAIL_NOT_VERIFIED',
         message: 'Confirmez votre adresse email avant de vous connecter.'

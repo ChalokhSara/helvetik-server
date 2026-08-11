@@ -123,6 +123,10 @@ export function renderRegistered(email: string, emailSent: boolean): string {
         </p>
         <p class="muted">Ouvrez le lien reçu pour activer votre compte : la connexion n'est
         possible qu'une fois l'adresse confirmée.</p>
+        ${emailSent ? `<p class="msg warn"><strong>Vous ne le trouvez pas ?</strong> Regardez dans vos
+        courriers indésirables ou votre dossier spam : notre message y atterrit souvent.
+        Pensez à nous y marquer comme expéditeur fiable, pour recevoir ensuite vos rappels
+        d'échéance.</p>` : ''}
         <div class="actions"><a class="btn" href="/connexion">Aller à la connexion</a></div>
       </div>`);
 }
