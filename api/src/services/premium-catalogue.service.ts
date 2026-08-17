@@ -1,6 +1,6 @@
-import { Premium, PremiumInsurer, TariffType } from '../models/premium.model';
+import { Premium, PremiumInsurer, PremiumYear, TariffType } from '../models/premium.model';
 import { TARIFF_TYPE_LABELS } from '../models/insurance.model';
-import { activeYear } from './premium-import.service';
+import { activeYear, DEFAULT_REDISTRIBUTION_YEARLY } from './premium-import.service';
 import { ageClassFor, resolveRegion } from './premium-query.service';
 
 /**
@@ -146,6 +146,79 @@ export async function premiumFor(lookup: PremiumLookup): Promise<number | null> 
   }).select('premium');
 
   return row ? row.premium : null;
+}
+
+/**
+ * Prime sous ses deux formes, celles que l'on rencontre sur les documents.
+ *
+ * L'OFSP publie la prime **brute**. Les caisses, elles, impriment souvent le
+ * **solde** : la redistribution des taxes environnementales, identique pour
+ * tout le monde, en est déjà déduite. Sur une même police on lit donc 334.05
+ * et 328.90 pour le même contrat.
+ *
+ * Les deux sont conservées côte à côte, sans en privilégier une : c'est ce qui
+ * permet de reconnaître un contrat à partir du montant imprimé, quel que soit
+ * celui que la caisse a choisi d'afficher.
+ */
+export interface PremiumVariants {
+  /** Prime publiée par l'OFSP, avant déduction. */
+  gross: number;
+  /** Prime après redistribution des taxes environnementales. */
+  net: number;
+  /** Montant mensuel de la redistribution, pour l'expliquer si besoin. */
+  redistribution: number;
+}
+
+/** Redistribution mensuelle en vigueur pour une année de primes. */
+async function monthlyRedistribution(year: number): Promise<number> {
+  const record = await PremiumYear.findOne({ year }).select('redistributionYearly');
+  return (record?.redistributionYearly ?? DEFAULT_REDISTRIBUTION_YEARLY) / 12;
+}
+
+export async function premiumVariantsFor(
+  lookup: PremiumLookup
+): Promise<PremiumVariants | null> {
+  const gross = await premiumFor(lookup);
+  if (gross === null) {
+    return null;
+  }
+
+  const redistribution = await monthlyRedistribution(lookup.year);
+  return {
+    gross,
+    net: Math.round((gross - redistribution) * 100) / 100,
+    redistribution
+  };
+}
+
+/**
+ * Toutes les primes d'une caisse pour des critères donnés, un modèle par
+ * entrée. Sert à retrouver un contrat à partir du montant lu sur sa police.
+ */
+export async function premiumsByTariff(
+  lookup: Omit<PremiumLookup, 'tariffCode'>,
+  tariffCodes: string[]
+): Promise<Map<string, PremiumVariants>> {
+  const redistribution = await monthlyRedistribution(lookup.year);
+  const ageClass = ageClassFor(lookup.age);
+
+  const rows = await Premium.find({
+    year: lookup.year,
+    canton: lookup.canton,
+    region: lookup.region,
+    insurerId: lookup.insurerId,
+    tariffCode: { $in: tariffCodes },
+    ageClass,
+    franchise: lookup.franchise,
+    withAccident: lookup.withAccident,
+    ...(ageClass === 'KIN' ? { ageSubgroup: 'K1' } : {})
+  }).select('tariffCode premium');
+
+  return new Map(rows.map((row) => [row.tariffCode, {
+    gross: row.premium,
+    net: Math.round((row.premium - redistribution) * 100) / 100,
+    redistribution
+  }]));
 }
 
 /** Franchises légales proposées à un assuré, selon son âge. */

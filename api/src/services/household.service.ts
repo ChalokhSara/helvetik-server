@@ -65,6 +65,12 @@ export async function isFirstClientOfHousehold(userUid: string): Promise<boolean
   return !(await Client.exists({ userUid }));
 }
 
+/** Nom lisible d'un assuré, même quand son identité n'est pas encore saisie. */
+export function describeClient(client: IClient): string {
+  const full = [client.firstname, client.name].filter(Boolean).join(' ').trim();
+  return full || client.email || 'Cet assuré';
+}
+
 export function ageAt(birthdate: Date, reference: Date): number {
   let age = reference.getUTCFullYear() - birthdate.getUTCFullYear();
   const monthDiff = reference.getUTCMonth() - birthdate.getUTCMonth();
@@ -109,11 +115,26 @@ export async function buildHouseholdContext(
     filter.uid = { $in: options.clientUids };
   }
 
-  const clients: IClient[] = await Client.find(filter).sort({ birthdate: 1 });
-  if (!clients.length) {
+  const all: IClient[] = await Client.find(filter).sort({ birthdate: 1 });
+  if (!all.length) {
     throw new HouseholdError(404, 'NO_INSURED', options.clientUids?.length
       ? 'Aucun de ces assurés n\'appartient à votre foyer.'
       : 'Aucun assuré dans ce foyer.');
+  }
+
+  // La prime dépend de l'âge : un assuré sans date de naissance ne peut pas
+  // être chiffré. Plutôt que d'inventer une valeur, on l'écarte et on le dit.
+  const clients = all.filter((client) => Boolean(client.birthdate));
+  for (const incomplete of all.filter((client) => !client.birthdate)) {
+    warnings.push(
+      `${describeClient(incomplete)} n'a pas de date de naissance : cette personne est écartée ` +
+      'de la comparaison. Complétez sa fiche, ou ajoutez sa pièce d\'identité.'
+    );
+  }
+  if (!clients.length) {
+    throw new HouseholdError(400, 'BIRTHDATE_REQUIRED',
+      'La comparaison a besoin de la date de naissance de chaque assuré. ' +
+      'Complétez votre profil — la lecture de votre pièce d\'identité la renseigne automatiquement.');
   }
 
   let selected = clients;
@@ -135,26 +156,26 @@ export async function buildHouseholdContext(
   const reference = selected[0];
   if (selected.some((c) => c.plz !== reference.plz)) {
     warnings.push(
-      `Tous les assurés n'ont pas le même NPA ; celui de ${reference.firstname} ${reference.name} (${reference.plz}) a été retenu.`
+      `Tous les assurés n'ont pas le même NPA ; celui de ${describeClient(reference)} (${reference.plz}) a été retenu.`
     );
   }
 
   const now = new Date();
   const insured = selected.map((client) => {
     const contract = lamalByClient.get(client.uid);
-    const age = ageAt(client.birthdate, now);
+    const age = ageAt(client.birthdate as Date, now);
     const isChild = age < ADULT_FROM_AGE;
     const franchise = nearestLegalFranchise(contract?.franchise, isChild);
 
     if (contract?.franchise !== undefined && contract.franchise !== franchise) {
       warnings.push(
-        `La franchise de ${client.firstname} ${client.name} (${contract.franchise}) n'est pas une franchise légale ` +
+        `La franchise de ${describeClient(client)} (${contract.franchise}) n'est pas une franchise légale ` +
         `pour son âge ; ${franchise} a été utilisée.`
       );
     }
     if (!contract) {
       warnings.push(
-        `Aucun contrat LAMal en vigueur pour ${client.firstname} ${client.name} : franchise par défaut de ${franchise}.`
+        `Aucun contrat LAMal en vigueur pour ${describeClient(client)} : franchise par défaut de ${franchise}.`
       );
     }
 
@@ -165,8 +186,8 @@ export async function buildHouseholdContext(
 
     return {
       clientUid: client.uid,
-      name: `${client.firstname} ${client.name}`,
-      yob: client.birthdate.getUTCFullYear(),
+      name: describeClient(client),
+      yob: (client.birthdate as Date).getUTCFullYear(),
       age,
       franchise,
       franchiseSource: contract ? 'contrat' : 'défaut',
@@ -186,8 +207,8 @@ export async function buildHouseholdContext(
   const contract = holder ? lamalByClient.get(holder.uid) : undefined;
   if (contract && holder && holder.uid !== reference.uid) {
     warnings.push(
-      `La caisse actuelle a été reprise du contrat de ${holder.firstname} ${holder.name}, ` +
-      `faute de contrat LAMal pour ${reference.firstname} ${reference.name}.`
+      `La caisse actuelle a été reprise du contrat de ${describeClient(holder)}, ` +
+      `faute de contrat LAMal pour ${describeClient(reference)}.`
     );
   }
 

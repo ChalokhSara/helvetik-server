@@ -25,6 +25,17 @@ services:
       - OCR_LANGUAGES=${OCR_LANGUAGES:-fra+deu}
       - TESSERACT_CACHE_PATH=/app/.tessdata
       - MAIL_FROM=${MAIL_FROM:-Helvetik <no-reply@helvetik.local>}
+      # Chiffrement des pièces d'identité conservées. Sans elle, une clé de
+      # développement publique prend le relais et le démarrage le signale ;
+      # en production, l'absence de clé arrête le serveur.
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:-}
+      # Lecture des polices d'assurance : le texte sorti de la reconnaissance
+      # optique est confié à un modèle de langage local, jamais à un service
+      # externe — une police porte nom, adresse, n° AVS et n° de police.
+      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+      - OLLAMA_ENABLED=${OLLAMA_ENABLED:-true}
+      - OLLAMA_TIMEOUT_MS=${OLLAMA_TIMEOUT_MS:-90000}
     volumes:
       # Les données de langue de la reconnaissance de texte sont téléchargées
       # au premier usage : les conserver évite de les retélécharger à chaque
@@ -32,6 +43,7 @@ services:
       - tessdata:/app/.tessdata
     depends_on:
       - mongodb
+      - ollama
     networks:
       - app-network
 
@@ -43,9 +55,43 @@ services:
     networks:
       - app-network
 
+  # Modèle de langage local, chargé de structurer le texte des polices.
+  #
+  # Volontairement **sans `ports:`** : il n'est joignable que depuis le réseau
+  # Docker, donc uniquement par l'API. Une interface d'inférence exposée à
+  # Internet serait à la fois un vecteur d'abus et une fuite de données.
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - app-network
+
+  # Télécharge le modèle une fois pour toutes, puis s'arrête. Sans lui, la
+  # première police déposée déclencherait un téléchargement de deux gigaoctets
+  # au milieu d'une requête web.
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until ollama list >/dev/null 2>&1; do
+          echo "attente du service ollama…"; sleep 2;
+        done
+        ollama pull "${OLLAMA_MODEL:-llama3.2:3b}"
+    restart: "no"
+    networks:
+      - app-network
+
 volumes:
   mongodb_data:
   tessdata:
+  ollama_models:
 
 networks:
   app-network:

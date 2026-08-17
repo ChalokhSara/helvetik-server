@@ -8,23 +8,26 @@ import { IClient } from '../models/client.model';
  */
 
 export interface ClientPayload {
-  name: string;
-  firstname: string;
-  birthdate: Date;
+  /** Identité : facultative, complétée après coup par lecture d'une pièce. */
+  name?: string;
+  firstname?: string;
+  birthdate?: Date;
+  nationality?: string;
+  sexe?: string;
   email: string;
   phone?: string;
   road: string;
   plz: string;
   location: string;
   canton: string;
-  nationality: string;
   avsNum: string;
-  sexe: string;
 }
 
 export interface ClientPayloadResult {
   values?: ClientPayload;
   error?: string;
+  /** Champ fautif, pour le signaler dans le formulaire. */
+  field?: string;
 }
 
 export function readClientPayload(
@@ -38,33 +41,40 @@ export function readClientPayload(
   const source = body as Record<string, unknown>;
   const str = (key: string) => String(source[key] ?? '').trim();
 
+  // La date de naissance n'est plus exigée : l'inscription se limite au
+  // contact, à l'adresse et au numéro AVS. Elle reste vérifiée dès qu'elle
+  // est fournie, car une date fausse fausserait toute la comparaison.
+  let birthdate: Date | undefined;
   const rawBirthdate = str('birthdate');
-  if (!rawBirthdate) {
-    return { error: 'La date de naissance est obligatoire.' };
+  if (rawBirthdate) {
+    birthdate = new Date(rawBirthdate);
+    if (Number.isNaN(birthdate.getTime())) {
+      return { error: 'La date de naissance est invalide.', field: 'birthdate' };
+    }
+    if (birthdate.getTime() > Date.now()) {
+      return { error: 'La date de naissance ne peut pas être dans le futur.', field: 'birthdate' };
+    }
   }
 
-  const birthdate = new Date(rawBirthdate);
-  if (Number.isNaN(birthdate.getTime())) {
-    return { error: 'La date de naissance est invalide.' };
-  }
-  if (birthdate.getTime() > Date.now()) {
-    return { error: 'La date de naissance ne peut pas être dans le futur.' };
-  }
+  // Les champs facultatifs vides sont omis plutôt qu'enregistrés à '' : une
+  // chaîne vide échouerait sur les énumérations (sexe) et ferait passer une
+  // fiche incomplète pour une fiche remplie.
+  const optional = (key: string) => str(key) || undefined;
 
   return {
     values: {
-      name: str('name'),
-      firstname: str('firstname'),
+      name: optional('name'),
+      firstname: optional('firstname'),
       birthdate,
+      nationality: optional('nationality'),
+      sexe: optional('sexe'),
       email: (str('email') || defaults.email || '').toLowerCase(),
-      phone: str('phone') || undefined,
+      phone: optional('phone'),
       road: str('road'),
       plz: str('plz'),
       location: str('location'),
       canton: str('canton'),
-      nationality: str('nationality'),
-      avsNum: str('avsNum'),
-      sexe: str('sexe')
+      avsNum: str('avsNum')
     }
   };
 }

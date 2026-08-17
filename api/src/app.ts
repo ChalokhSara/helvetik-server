@@ -9,6 +9,8 @@ import { specs } from './config/swagger';
 import { ensureSuperAdmin } from './config/seed';
 import { startScheduler } from './config/scheduler';
 import { emailConfirmationRequired, loadSettings, startSettingsRefresh } from './config/features';
+import { checkVaultConfiguration } from './services/document-vault.service';
+import { checkLlmAvailability } from './services/policy-llm.service';
 import { authRouter } from './routes/auth.routes';
 import { clientsRouter } from './routes/clients.routes';
 import { insurancesRouter } from './routes/insurances.routes';
@@ -122,6 +124,9 @@ function logEnvironment(): void {
     ? (process.env.APP_BASE_URL || 'NON CONFIGURÉ')
     : `déduits de la requête (repli : ${process.env.APP_BASE_URL || `http://localhost:${PORT}`})`}`);
   console.log(`│ base          : ${MONGODB_URI.replace(/\/\/[^@]*@/, '//***@')}`);
+  console.log(`│ pièces d'id.  : ${process.env.DOCUMENT_ENCRYPTION_KEY
+    ? 'chiffrées avec DOCUMENT_ENCRYPTION_KEY'
+    : 'chiffrées avec la CLÉ DE DÉVELOPPEMENT, publique'}`);
   console.log('└' + '─'.repeat(63));
 
   if (IS_PRODUCTION && !process.env.SMTP_HOST) {
@@ -135,6 +140,12 @@ function logEnvironment(): void {
 // Démarrage du serveur
 app.listen(PORT, () => {
   logEnvironment();
+  // Vérifié ici plutôt qu'au premier dépôt : un refus d'enregistrer une pièce
+  // d'identité serait découvert par l'assuré, pas par l'exploitant.
+  checkVaultConfiguration();
+  // Sans attendre : un modèle encore en téléchargement ne doit pas retarder
+  // le démarrage, la lecture des polices retombe simplement sur les motifs.
+  void checkLlmAvailability();
   console.log(`Serveur démarré sur le port ${PORT}`);
 });
 

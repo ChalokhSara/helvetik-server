@@ -22,13 +22,17 @@ import {
   TYPE_LABELS,
   HouseholdAddress,
   LamalCatalogue,
+  StoredSide,
   Values,
+  accountFields,
   checkbox,
   errorSummary,
+  identityUploadBlock,
   importBlock,
   insuranceFields,
   insuredFields,
   radios,
+  select,
   text,
   textarea,
   validationScript
@@ -90,21 +94,14 @@ export function renderRegister(options: {
   invalidFields?: string[];
 }): string {
   return sitePage('Helvetik — Créer un compte', {}, `    <h1>Créer mon compte</h1>
-    <p class="lead">Vos identifiants, puis vos informations personnelles : vous serez le premier
-    assuré du foyer, et vous pourrez en ajouter d'autres ensuite.</p>
+    <p class="lead">Quatre informations suffisent pour commencer. Il vous sera ensuite
+    demandé une photo des deux faces de votre pièce d'identité : votre nom et votre date
+    de naissance en seront lus, et une copie doit accompagner vos lettres de résiliation.</p>
 ${messages(options)}
     <form method="post" action="/inscription" class="card" id="main-form"${invalidAttr(options.invalidFields)}>
       ${csrfField(options.csrf)}
 ${errorSummary()}
-      <fieldset>
-        <legend>Identifiants</legend>
-        <div class="grid">
-${text(options.values, 'accountEmail', 'Email de connexion', 'type="email" autocomplete="email"')}
-${text(options.values, 'password', 'Mot de passe', 'type="password" autocomplete="new-password" minlength="8"')}
-        </div>
-        <p class="muted">Huit caractères au minimum. Un email de confirmation vous sera envoyé.</p>
-      </fieldset>
-${insuredFields(options.values, undefined, true)}
+${accountFields(options.values)}
 ${validationScript()}
       <div class="actions">
         <button type="submit">Créer mon compte</button>
@@ -141,6 +138,94 @@ export function renderEmailConfirmation(options: { success: boolean; message: st
       </div>`);
 }
 
+// ------------------------------------------------------- pièce d'identité
+
+/**
+ * Pièce d'identité d'un assuré : dépôt du recto et du verso, puis relecture
+ * de l'identité qui en a été extraite.
+ *
+ * Les deux faces sont conservées, chiffrées : elles devront accompagner les
+ * lettres de résiliation et d'affiliation, que les caisses refusent sans copie
+ * de la pièce. C'est dit explicitement à l'assuré — conserver une carte
+ * d'identité sans l'annoncer serait indéfendable.
+ *
+ * La saisie manuelle reste ouverte en parallèle : une pièce illisible ou une
+ * reconnaissance ratée ne doit jamais bloquer le compte.
+ */
+export function renderIdentity(o: {
+  email: string;
+  csrf: string;
+  values: Values;
+  /** Assuré concerné : le titulaire par défaut, un membre du foyer sinon. */
+  clientUid?: string;
+  clientLabel?: string;
+  stored: StoredSide[];
+  /** Vrai juste après l'inscription : le ton et les boutons changent. */
+  fresh?: boolean;
+  info?: string;
+  error?: string;
+  warnings?: string[];
+  invalidFields?: string[];
+}): string {
+  const known = Boolean(o.values.birthdate);
+  const base = o.clientUid ? `/espace/assures/${o.clientUid}/piece` : '/espace/identite';
+  const complete = o.stored.length === 2;
+
+  const title = o.clientLabel
+    ? `Pièce d'identité de ${escapeHtml(o.clientLabel)}`
+    : o.fresh ? 'Bienvenue — dernière étape' : 'Ma pièce d\'identité';
+
+  return sitePage('Helvetik — Pièce d\'identité', { email: o.email, active: 'assures' },
+    `    <h1>${title}</h1>
+    <p class="lead">Photographiez les <strong>deux faces</strong> de votre carte d'identité,
+    de votre passeport ou de votre permis. Elles sont conservées pour être jointes
+    à vos lettres de résiliation et d'affiliation : les caisses les exigent.</p>
+${messages({ error: o.error, info: o.info })}
+${(o.warnings || []).map((w) => `    <p class="msg warn">${escapeHtml(w)}</p>`).join('\n')}
+${complete
+      ? '    <p class="msg ok">Les deux faces sont enregistrées : votre dossier est complet.</p>'
+      : ''}
+${identityUploadBlock({
+      action: `${base}/deposer`,
+      csrf: o.csrf,
+      stored: o.stored,
+      viewPath: (side) => `${base}/${side.toLowerCase()}`,
+      deletePath: (side) => `${base}/${side.toLowerCase()}/supprimer`
+    })}
+    <div class="card">
+      <h2>Comment vos pièces sont conservées</h2>
+      <ul class="muted" style="margin:.4rem 0 0;padding-left:1.1rem">
+        <li>Chiffrées avant enregistrement : la clé ne se trouve pas dans la base.</li>
+        <li>Utilisées uniquement en annexe de vos lettres de résiliation et d'affiliation.</li>
+        <li>Supprimables à tout moment depuis cette page, sans condition.</li>
+      </ul>
+    </div>
+
+    <form method="post" action="${base}" class="card" id="main-form"${invalidAttr(o.invalidFields)}>
+      ${csrfField(o.csrf)}
+${errorSummary()}
+      <fieldset>
+        <legend>Identité lue sur la pièce</legend>
+        <div class="grid">
+${text(o.values, 'firstname', 'Prénom', 'type="text" autocomplete="given-name"', false)}
+${text(o.values, 'name', 'Nom', 'type="text" autocomplete="family-name"', false)}
+${text(o.values, 'birthdate', 'Date de naissance', 'type="date" max="9999-12-31"', false)}
+${select(o.values, 'sexe', 'Sexe', [['F', 'Féminin'], ['M', 'Masculin'], ['X', 'Autre']],
+      { placeholder: '— Choisir —', required: false })}
+${text(o.values, 'nationality', 'Nationalité', 'type="text" placeholder="CH"', false)}
+        </div>
+        <p class="muted">${known
+      ? 'Relisez ce qui a été reconnu : une reconnaissance de caractères se trompe.'
+      : 'La date de naissance détermine la tranche d\'âge, donc la prime.'}</p>
+      </fieldset>
+${validationScript()}
+      <div class="actions">
+        <button type="submit">Enregistrer</button>
+        <a class="link" href="${o.clientUid ? '/espace/assures' : '/espace'}">${o.fresh ? 'Plus tard' : 'Retour'}</a>
+      </div>
+    </form>`);
+}
+
 // -------------------------------------------------------------- dashboard
 
 export interface DashboardOptions {
@@ -149,6 +234,8 @@ export interface DashboardOptions {
   insurances: IInsurance[];
   monthlyTotal: number;
   nextDeadline?: { insurance: IInsurance; deadline: Date; daysLeft: number };
+  /** Assurés dont la date de naissance manque encore. */
+  incomplete?: IClient[];
   savings?: { monthly: number; yearly: number } | null;
   notice?: string;
 }
@@ -182,9 +269,22 @@ export function renderDashboard(o: DashboardOptions): string {
         ${lamalCount ? 'Comparer mes primes' : 'Ajouter ma LAMal'}</a></div>
     </div>`;
 
+  // Sans date de naissance, la comparaison est impossible : c'est la seule
+  // chose qui manque encore, et elle tient en une photo.
+  const incomplete = o.incomplete?.length
+    ? `    <div class="card">
+      <h2>Il manque votre date de naissance</h2>
+      <p class="muted">${o.incomplete.length === 1
+        ? 'La comparaison des primes en dépend : elle détermine la tranche d\'âge.'
+        : `${o.incomplete.length} assurés n'ont pas de date de naissance et sont écartés de la comparaison.`}</p>
+      <div class="actions"><a class="btn" href="/espace/identite">Photographier ma pièce d'identité</a></div>
+    </div>`
+    : '';
+
   return sitePage('Helvetik — Mon espace', { email: o.email, active: 'accueil' },
     `    <h1>Bonjour</h1>
 ${messages({ notice: o.notice })}
+${incomplete}
     <div class="stats" style="margin-bottom:1rem">
       <div class="stat"><span class="value">${o.clients.length}</span><span class="label">assuré(s)</span></div>
       <div class="stat"><span class="value">${o.insurances.length}</span><span class="label">contrat(s)</span></div>
@@ -203,29 +303,56 @@ ${deadline}
 
 // ---------------------------------------------------------------- assurés
 
+/**
+ * Titre d'un assuré : l'identité n'est plus demandée à l'inscription, on se
+ * rabat sur l'email tant qu'elle n'a pas été saisie ou lue sur une pièce.
+ */
+function clientTitle(c: IClient): string {
+  return [c.firstname, c.name].filter(Boolean).join(' ').trim() || c.email;
+}
+
 export function renderClients(o: {
   email: string;
   clients: IClient[];
   insuranceCount: Map<string, number>;
+  /** Nombre de faces de pièce d'identité déposées, par assuré. */
+  documentCount: Map<string, number>;
   notice?: string;
 }): string {
+  // Une lettre de résiliation part avec une copie de la pièce : tant que les
+  // deux faces manquent, le dossier de cet assuré est incomplet, et le dire
+  // ici évite de le découvrir au moment d'agir.
+  const documentBadge = (uid: string) => {
+    const count = o.documentCount.get(uid) || 0;
+    if (count >= 2) {
+      return '<span class="badge">Pièce complète</span>';
+    }
+    return `<span class="badge off">Pièce ${count === 1 ? 'incomplète' : 'manquante'}</span>`;
+  };
+
   const body = o.clients.length === 0
     ? '    <p class="empty">Aucun assuré pour l\'instant.</p>'
     : `    <ul class="items">
 ${o.clients.map((c) => `      <li>
         <span>
-          <span class="title">${escapeHtml(c.firstname)} ${escapeHtml(c.name)}</span>
-          ${c.blocked ? '<span class="badge off">Bloqué</span>' : ''}<br>
+          <span class="title">${escapeHtml(clientTitle(c))}</span>
+          ${c.blocked ? '<span class="badge off">Bloqué</span>' : ''}${c.birthdate ? '' : '<span class="badge off">Identité à compléter</span>'}
+          ${documentBadge(c.uid)}<br>
           <span class="meta">Né(e) le ${formatDate(c.birthdate)} · ${escapeHtml(c.plz)} ${escapeHtml(c.location)} ·
           ${o.insuranceCount.get(c.uid) || 0} contrat(s)</span>
         </span>
-        <span class="right"><a class="btn btn-ghost" href="/espace/assures/${escapeHtml(c.uid)}/modifier">Modifier</a></span>
+        <span class="right">
+          <a class="btn btn-ghost" href="/espace/assures/${escapeHtml(c.uid)}/piece">Pièce d'identité</a>
+          <a class="btn btn-ghost" href="/espace/assures/${escapeHtml(c.uid)}/modifier">Modifier</a>
+        </span>
       </li>`).join('\n')}
     </ul>`;
 
   return sitePage('Helvetik — Mes assurés', { email: o.email, active: 'assures' },
     `    <h1>Mes assurés</h1>
-    <p class="lead">Vous-même et les membres de votre famille couverts par vos contrats.</p>
+    <p class="lead">Vous-même et les membres de votre famille couverts par vos contrats.
+    Chacun a besoin d'une copie de sa pièce d'identité : elle accompagne les lettres
+    de résiliation et d'affiliation.</p>
 ${messages({ notice: o.notice })}
     <div class="card">
 ${body}
@@ -295,7 +422,7 @@ export function renderInsurances(o: {
     : `    <ul class="items">
 ${o.insurances.map((i) => {
     const client = o.clients.get(i.clientUid);
-    const insured = client ? `${client.firstname} ${client.name}` : i.clientUid;
+    const insured = client ? clientTitle(client) : i.clientUid;
     const deadline = cancellationDeadline(i);
     return `      <li>
         <span>

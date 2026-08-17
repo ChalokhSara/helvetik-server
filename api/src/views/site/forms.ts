@@ -10,7 +10,7 @@ import {
   TARIFF_TYPES,
   TARIFF_TYPE_LABELS
 } from '../../models/insurance.model';
-import { escapeHtml } from './layout';
+import { escapeHtml, formatDate } from './layout';
 
 export const TYPE_LABELS: Record<string, string> = {
   LAMAL: 'LAMal — assurance de base',
@@ -170,55 +170,36 @@ export function validationScript(): string {
 }
 
 /**
- * Dépôt d'un document pour pré-remplir le formulaire.
+ * Prise de vue dans la page, pour un champ fichier donné.
  *
- * `capture="environment"` ouvre directement l'appareil photo arrière sur
- * mobile, tout en laissant le choix d'un fichier existant sur ordinateur.
+ * Le préfixe rend le bloc instanciable plusieurs fois sur une même page : la
+ * pièce d'identité en demande deux, un pour le recto et un pour le verso.
  */
-export function importBlock(options: { action: string; csrf: string; hint: string }): string {
-  return `    <details class="card" style="margin-bottom:1rem">
-      <summary style="cursor:pointer;font-weight:600">Gagner du temps : partir d'une photo ou d'un document</summary>
-      <p class="muted">${escapeHtml(options.hint)}</p>
-      <form method="post" action="${options.action}" enctype="multipart/form-data" id="import-form">
-
-        <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
-
-        <!-- Prise de vue dans la page. Masquée tant que la caméra n'est pas
+function cameraMarkup(prefix: string, label: string): string {
+  return `        <!-- Prise de vue dans la page. Masquée tant que la caméra n'est pas
              utilisable : le champ fichier ci-dessous suffit alors. -->
-        <div class="camera" id="camera" hidden>
-          <div class="stage" id="stage">
-            <video id="preview" playsinline muted></video>
-            <img class="shot" id="shot" alt="Photo prise">
+        <div class="camera" id="${prefix}-camera" hidden>
+          <div class="stage" id="${prefix}-stage">
+            <video id="${prefix}-preview" playsinline muted></video>
+            <img class="shot" id="${prefix}-shot" alt="Photo prise">
             <div class="frame"></div>
           </div>
           <div class="row">
-            <button type="button" id="cam-open">Prendre une photo</button>
-            <button type="button" id="cam-shoot" hidden>Capturer</button>
-            <button type="button" id="cam-retry" class="btn-ghost" hidden>Reprendre</button>
-            <button type="button" id="cam-close" class="btn-ghost" hidden>Fermer la caméra</button>
+            <button type="button" id="${prefix}-open">${escapeHtml(label)}</button>
+            <button type="button" id="${prefix}-shoot" hidden>Capturer</button>
+            <button type="button" id="${prefix}-retry" class="btn-ghost" hidden>Reprendre</button>
+            <button type="button" id="${prefix}-close" class="btn-ghost" hidden>Fermer la caméra</button>
           </div>
-          <p class="muted" id="cam-status"></p>
-        </div>
+          <p class="muted" id="${prefix}-status"></p>
+        </div>`;
+}
 
-        <!-- Volontairement non obligatoire : le champ est masqué tant que le
-             bloc est replié, et un champ obligatoire invisible fait échouer la
-             validation du navigateur sans qu'aucun message ne soit affichable.
-             L'absence de fichier est signalée par le serveur. -->
-        <label for="document">Ou choisir un fichier</label>
-        <input id="document" name="document" type="file"
-               accept="image/*,application/pdf" capture="environment">
-
-        <div class="actions">
-          <button type="submit">Analyser le document</button>
-        </div>
-      </form>
-      <p class="muted">Le fichier est analysé puis supprimé : il n'est jamais conservé.
-      Les champs reconnus restent à vérifier avant enregistrement.</p>
-
-      <script>
+/** Comportement de la prise de vue, attaché au champ fichier `inputId`. */
+function cameraScript(prefix: string, inputId: string, formId: string): string {
+  return `      <script>
         (function () {
-          var camera = document.getElementById('camera');
-          var input = document.getElementById('document');
+          var camera = document.getElementById('${prefix}-camera');
+          var input = document.getElementById('${inputId}');
           if (!camera || !input) { return; }
 
           // getUserMedia n'existe qu'en contexte sécurisé (HTTPS ou localhost),
@@ -230,14 +211,14 @@ export function importBlock(options: { action: string; csrf: string; hint: strin
           if (!usable) { return; }
           camera.hidden = false;
 
-          var stage = document.getElementById('stage');
-          var video = document.getElementById('preview');
-          var shot = document.getElementById('shot');
-          var status = document.getElementById('cam-status');
-          var open = document.getElementById('cam-open');
-          var shoot = document.getElementById('cam-shoot');
-          var retry = document.getElementById('cam-retry');
-          var close = document.getElementById('cam-close');
+          var stage = document.getElementById('${prefix}-stage');
+          var video = document.getElementById('${prefix}-preview');
+          var shot = document.getElementById('${prefix}-shot');
+          var status = document.getElementById('${prefix}-status');
+          var open = document.getElementById('${prefix}-open');
+          var shoot = document.getElementById('${prefix}-shoot');
+          var retry = document.getElementById('${prefix}-retry');
+          var close = document.getElementById('${prefix}-close');
           var stream = null;
 
           function show(a, b, c, d) {
@@ -281,12 +262,13 @@ export function importBlock(options: { action: string; csrf: string; hint: strin
 
             canvas.toBlob(function (blob) {
               if (!blob) { status.textContent = 'La capture a échoué, réessayez.'; return; }
-              var file = new File([blob], 'photo.jpg', { type: 'image/jpeg' });
+              var file = new File([blob], '${prefix}.jpg', { type: 'image/jpeg' });
               var data = new DataTransfer();
               data.items.add(file);
               input.files = data.files;
               status.textContent = 'Photo prête (' + Math.round(blob.size / 1024) + ' Ko). ' +
-                'Lancez l\\'analyse, ou reprenez la photo.';
+                'Vous pouvez la reprendre si elle est floue.';
+              input.dispatchEvent(new Event('change', { bubbles: true }));
             }, 'image/jpeg', 0.92);
 
             // Le flux n'a plus d'utilité une fois l'image figée.
@@ -298,10 +280,119 @@ export function importBlock(options: { action: string; csrf: string; hint: strin
 
           // Ne pas laisser la caméra allumée en quittant la page.
           window.addEventListener('pagehide', stop);
-          document.getElementById('import-form').addEventListener('submit', stop);
+          var form = document.getElementById('${formId}');
+          if (form) { form.addEventListener('submit', stop); }
         })();
-      </script>
+      </script>`;
+}
+
+/**
+ * Dépôt d'un document pour pré-remplir le formulaire, sans conservation.
+ *
+ * `capture="environment"` ouvre directement l'appareil photo arrière sur
+ * mobile, tout en laissant le choix d'un fichier existant sur ordinateur.
+ */
+export function importBlock(options: { action: string; csrf: string; hint: string }): string {
+  return `    <details class="card" style="margin-bottom:1rem">
+      <summary style="cursor:pointer;font-weight:600">Gagner du temps : partir d'une photo ou d'un document</summary>
+      <p class="muted">${escapeHtml(options.hint)}</p>
+      <form method="post" action="${options.action}" enctype="multipart/form-data" id="import-form">
+
+        <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
+
+${cameraMarkup('cam', 'Prendre une photo')}
+
+        <!-- Volontairement non obligatoire : le champ est masqué tant que le
+             bloc est replié, et un champ obligatoire invisible fait échouer la
+             validation du navigateur sans qu'aucun message ne soit affichable.
+             L'absence de fichier est signalée par le serveur. -->
+        <label for="document">Ou choisir un fichier</label>
+        <input id="document" name="document" type="file"
+               accept="image/*,application/pdf" capture="environment">
+
+        <div class="actions">
+          <button type="submit">Analyser le document</button>
+        </div>
+      </form>
+      <p class="muted">Le fichier est analysé puis supprimé : il n'est jamais conservé.
+      Les champs reconnus restent à vérifier avant enregistrement.</p>
+
+${cameraScript('cam', 'document', 'import-form')}
     </details>`;
+}
+
+/** Pièce déjà déposée, telle qu'affichée à l'assuré. */
+export interface StoredSide {
+  side: 'RECTO' | 'VERSO';
+  filename: string;
+  size: number;
+  uploadedAt: Date;
+}
+
+/**
+ * Dépôt du recto et du verso d'une pièce d'identité.
+ *
+ * Les deux faces sont demandées parce que les caisses les exigent en annexe
+ * des lettres de résiliation et d'affiliation : le recto porte la photo et
+ * l'identité, le verso la bande lisible par machine et la validité. Une seule
+ * face rendrait le dossier irrecevable.
+ *
+ * Chaque face est déposée séparément : sur un téléphone, on photographie
+ * rarement les deux d'affilée sans se tromper, et devoir tout recommencer
+ * parce que la seconde est floue serait décourageant.
+ */
+export function identityUploadBlock(options: {
+  action: string;
+  csrf: string;
+  stored: StoredSide[];
+  /** Adresse de consultation, par face. */
+  viewPath: (side: 'RECTO' | 'VERSO') => string;
+  deletePath: (side: 'RECTO' | 'VERSO') => string;
+}): string {
+  const byside = new Map(options.stored.map((s) => [s.side, s]));
+
+  const face = (side: 'RECTO' | 'VERSO', title: string, hint: string) => {
+    const prefix = side.toLowerCase();
+    const existing = byside.get(side);
+
+    const state = existing
+      ? `        <p class="msg ok">Enregistré le ${formatDate(existing.uploadedAt)}
+        — ${escapeHtml(existing.filename)} (${Math.round(existing.size / 1024)} Ko).</p>
+        <div class="actions" style="margin-bottom:.75rem">
+          <a class="btn btn-ghost" href="${options.viewPath(side)}" target="_blank" rel="noopener">Voir</a>
+          <form method="post" action="${options.deletePath(side)}" style="display:inline"
+                onsubmit="return confirm('Supprimer définitivement le ${escapeHtml(title.toLowerCase())} ?')">
+            <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
+            <button type="submit" class="btn-danger">Supprimer</button>
+          </form>
+        </div>
+        <p class="muted">Déposer un nouveau fichier remplacera celui-ci.</p>`
+      : `        <p class="msg warn">Pas encore déposé.</p>`;
+
+    return `      <div class="card">
+        <h2>${escapeHtml(title)}</h2>
+        <p class="muted">${escapeHtml(hint)}</p>
+${state}
+        <form method="post" action="${options.action}" enctype="multipart/form-data"
+              id="${prefix}-form" class="side-form">
+          <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
+          <input type="hidden" name="side" value="${side}">
+${cameraMarkup(prefix, 'Photographier')}
+          <label for="${prefix}-file">Ou choisir un fichier</label>
+          <input id="${prefix}-file" name="document" type="file"
+                 accept="image/*,application/pdf" capture="environment">
+          <div class="actions">
+            <button type="submit">${existing ? 'Remplacer' : 'Enregistrer'} le ${escapeHtml(title.toLowerCase())}</button>
+          </div>
+        </form>
+${cameraScript(prefix, `${prefix}-file`, `${prefix}-form`)}
+      </div>`;
+  };
+
+  return `    <div class="stats">
+${face('RECTO', 'Recto', 'La face avec la photographie, le nom et la date de naissance.')}
+${face('VERSO', 'Verso', 'La face avec les lignes de caractères en majuscules : c\'est celle qui est lue automatiquement.')}
+    </div>`;
 }
 
 export function text(
@@ -466,6 +557,181 @@ function sameAsHousehold(values: Values, address: HouseholdAddress): boolean {
 }
 
 /**
+ * Champs d'adresse, avec proposition automatique.
+ *
+ * L'assuré tape sa rue ; le serveur interroge le registre fédéral des
+ * bâtiments et renvoie des adresses complètes. En choisir une remplit d'un
+ * coup la rue, le NPA, la localité et le canton — c'est la partie la plus
+ * fastidieuse de l'inscription, et celle où une faute coûte le plus cher :
+ * le NPA détermine la région de primes.
+ *
+ * Sans JavaScript, les quatre champs restent saisissables à la main, et le
+ * serveur complète tout de même le canton depuis le NPA.
+ */
+export function addressFields(values: Values): string {
+  return `      <div class="suggest">
+${text(values, 'road', 'Rue et numéro',
+    'type="text" autocomplete="street-address" placeholder="Avenue de France 1" ' +
+    'role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="road-list"')}
+        <ul class="suggest-list" id="road-list" role="listbox" hidden></ul>
+      </div>
+      <div class="grid">
+${text(values, 'plz', 'NPA', 'type="text" inputmode="numeric" pattern="\\d{4}" placeholder="1000" autocomplete="postal-code"')}
+${text(values, 'location', 'Localité', 'type="text" autocomplete="address-level2"')}
+${select(values, 'canton', 'Canton', CANTONS.map((c) => [c, c] as [string, string]),
+    { placeholder: '— déduit du NPA —', required: false })}
+      </div>
+      <p class="muted">Commencez à taper votre rue : les adresses suisses vous sont proposées.
+      Le NPA détermine votre région de primes, il doit être exact. Le canton en découle :
+      inutile de le choisir.</p>
+${addressScript()}`;
+}
+
+/**
+ * Comportement de l'autocomplétion. Émis après les champs, sans quoi il ne
+ * les trouverait pas.
+ */
+function addressScript(): string {
+  return `      <script>
+        (function () {
+          var road = document.getElementById('road');
+          var list = document.getElementById('road-list');
+          var plz = document.getElementById('plz');
+          var location_ = document.getElementById('location');
+          var canton = document.getElementById('canton');
+          if (!road || !list || !window.fetch) { return; }
+
+          var items = [];
+          var active = -1;
+          var timer = null;
+          var lastQuery = '';
+          var pending = null;
+
+          function close() {
+            list.hidden = true;
+            list.textContent = '';
+            road.setAttribute('aria-expanded', 'false');
+            items = [];
+            active = -1;
+          }
+
+          function apply(item) {
+            road.value = item.road;
+            if (plz) { plz.value = item.plz; }
+            if (location_) { location_.value = item.location; }
+            // Le canton peut manquer quand les tarifs officiels ne sont pas
+            // encore importés : on laisse alors le choix en place.
+            if (canton && item.canton) { canton.value = item.canton; }
+            close();
+            // La validation en cours de saisie doit reprendre la main sur les
+            // champs remplis par le script : ils ne déclenchent pas 'input'.
+            [road, plz, location_, canton].forEach(function (el) {
+              if (el) { el.dispatchEvent(new Event('input', { bubbles: true })); }
+            });
+          }
+
+          function highlight(index) {
+            active = index;
+            [].forEach.call(list.children, function (li, i) {
+              li.classList.toggle('on', i === index);
+              li.setAttribute('aria-selected', i === index ? 'true' : 'false');
+            });
+          }
+
+          function render(results) {
+            list.textContent = '';
+            items = results;
+            if (!results.length) { return close(); }
+
+            results.forEach(function (item, index) {
+              var li = document.createElement('li');
+              li.setAttribute('role', 'option');
+              li.id = 'road-option-' + index;
+              // textContent : le libellé vient d'un service externe.
+              li.textContent = item.label;
+              li.addEventListener('mousedown', function (event) {
+                // mousedown plutôt que click : le blur du champ fermerait la
+                // liste avant que le clic n'aboutisse.
+                event.preventDefault();
+                apply(item);
+              });
+              list.appendChild(li);
+            });
+
+            list.hidden = false;
+            road.setAttribute('aria-expanded', 'true');
+            highlight(-1);
+          }
+
+          function search() {
+            var query = road.value.trim();
+            if (query.length < 3 || query === lastQuery) { return; }
+            lastQuery = query;
+
+            if (pending) { pending.abort(); }
+            pending = typeof AbortController !== 'undefined' ? new AbortController() : null;
+
+            fetch('/adresses?q=' + encodeURIComponent(query), {
+              headers: { 'Accept': 'application/json' },
+              signal: pending ? pending.signal : undefined
+            })
+              .then(function (r) { return r.ok ? r.json() : { results: [] }; })
+              .then(function (body) {
+                // Une réponse tardive ne doit pas écraser une saisie plus récente.
+                if (road.value.trim() === query) { render(body.results || []); }
+              })
+              .catch(function () { /* l'aide est facultative, la saisie reste possible */ });
+          }
+
+          road.setAttribute('autocomplete', 'off');
+          road.addEventListener('input', function () {
+            clearTimeout(timer);
+            if (road.value.trim().length < 3) { return close(); }
+            timer = setTimeout(search, 220);
+          });
+
+          road.addEventListener('keydown', function (event) {
+            if (list.hidden || !items.length) { return; }
+            if (event.key === 'ArrowDown') {
+              event.preventDefault();
+              highlight((active + 1) % items.length);
+            } else if (event.key === 'ArrowUp') {
+              event.preventDefault();
+              highlight((active - 1 + items.length) % items.length);
+            } else if (event.key === 'Enter' && active >= 0) {
+              event.preventDefault();
+              apply(items[active]);
+            } else if (event.key === 'Escape') {
+              close();
+            }
+          });
+
+          road.addEventListener('blur', function () { setTimeout(close, 150); });
+
+          // Saisie manuelle du NPA : le canton et la localité s'en déduisent,
+          // ce qui évite de faire chercher un code à deux lettres.
+          if (plz) {
+            plz.addEventListener('change', function () {
+              if (!/^\\d{4}$/.test(plz.value.trim())) { return; }
+              if (canton && canton.value && location_ && location_.value) { return; }
+
+              fetch('/adresses/npa?plz=' + encodeURIComponent(plz.value.trim()) +
+                    '&location=' + encodeURIComponent(location_ ? location_.value : ''), {
+                headers: { 'Accept': 'application/json' }
+              })
+                .then(function (r) { return r.ok ? r.json() : {}; })
+                .then(function (body) {
+                  if (canton && !canton.value && body.canton) { canton.value = body.canton; }
+                  if (location_ && !location_.value && body.location) { location_.value = body.location; }
+                })
+                .catch(function () { /* saisie manuelle */ });
+            });
+          }
+        })();
+      </script>`;
+}
+
+/**
  * Identité et adresse d'un assuré.
  *
  * `requirePhone` n'est vrai qu'à l'inscription : le numéro du titulaire sert
@@ -479,12 +745,14 @@ export function insuredFields(
 ): string {
   return `    <fieldset>
       <legend>Identité</legend>
+      <p class="muted">Facultative, mais la date de naissance conditionne la prime :
+      sans elle, cette personne est écartée de la comparaison.</p>
       <div class="grid">
-${text(values, 'firstname', 'Prénom', 'type="text" autocomplete="given-name"')}
-${text(values, 'name', 'Nom', 'type="text" autocomplete="family-name"')}
-${text(values, 'birthdate', 'Date de naissance', 'type="date" max="9999-12-31"')}
-${select(values, 'sexe', 'Sexe', SEXES, { placeholder: '— Choisir —' })}
-${text(values, 'nationality', 'Nationalité', 'type="text" placeholder="CH"')}
+${text(values, 'firstname', 'Prénom', 'type="text" autocomplete="given-name"', false)}
+${text(values, 'name', 'Nom', 'type="text" autocomplete="family-name"', false)}
+${text(values, 'birthdate', 'Date de naissance', 'type="date" max="9999-12-31"', false)}
+${select(values, 'sexe', 'Sexe', SEXES, { placeholder: '— Choisir —', required: false })}
+${text(values, 'nationality', 'Nationalité', 'type="text" placeholder="CH"', false)}
 ${text(values, 'avsNum', 'N° AVS', 'type="text" inputmode="numeric" placeholder="756.1234.5678.90" pattern="756\\.\\d{4}\\.\\d{4}\\.\\d{2}"')}
       </div>
       <p class="muted">Le numéro AVS figure sur votre carte d'assurance, au format 756.XXXX.XXXX.XX.</p>
@@ -498,14 +766,39 @@ ${text(values, 'phone', requirePhone ? 'Téléphone' : 'Téléphone (facultatif)
   'type="tel" autocomplete="tel" placeholder="+41 79 123 45 67"', requirePhone)}
       </div>
 ${address ? sameAddressBlock(address, sameAsHousehold(values, address)) : ''}
-${text(values, 'road', 'Rue et numéro', 'type="text" autocomplete="street-address"')}
-      <div class="grid">
-${text(values, 'plz', 'NPA', 'type="text" inputmode="numeric" pattern="\\d{4}" placeholder="1000" autocomplete="postal-code"')}
-${text(values, 'location', 'Localité', 'type="text" autocomplete="address-level2"')}
-${select(values, 'canton', 'Canton', CANTONS.map((c) => [c, c] as [string, string]), { placeholder: '—' })}
-      </div>
-      <p class="muted">Le NPA et la localité déterminent votre région de primes : ils doivent être exacts.</p>
+${addressFields(values)}
 ${address ? sameAddressScript() : ''}
+    </fieldset>`;
+}
+
+/**
+ * Champs de l'inscription, réduits au strict nécessaire.
+ *
+ * Quatre informations suffisent à ouvrir un compte : de quoi vous joindre
+ * (email, téléphone), où vous habitez (l'adresse, qui fixe la région de
+ * primes) et votre numéro AVS. Le nom, le prénom et la date de naissance
+ * viennent ensuite, lus sur une pièce d'identité en une photo.
+ *
+ * Chaque champ demandé de plus est un compte qui ne se crée pas : c'est la
+ * raison d'être de ce formulaire séparé d'`insuredFields`.
+ */
+export function accountFields(values: Values): string {
+  return `    <fieldset>
+      <legend>Vous joindre</legend>
+      <div class="grid">
+${text(values, 'accountEmail', 'Email', 'type="email" autocomplete="email" autofocus')}
+${text(values, 'password', 'Mot de passe', 'type="password" autocomplete="new-password" minlength="8"')}
+${text(values, 'phone', 'Téléphone', 'type="tel" autocomplete="tel" placeholder="+41 79 123 45 67"')}
+${text(values, 'avsNum', 'N° AVS',
+    'type="text" inputmode="numeric" placeholder="756.1234.5678.90" pattern="756\\.\\d{4}\\.\\d{4}\\.\\d{2}"')}
+      </div>
+      <p class="muted">Mot de passe : huit caractères au minimum. Le numéro AVS figure sur
+      votre carte d'assurance, au format 756.XXXX.XXXX.XX.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Votre adresse</legend>
+${addressFields(values)}
     </fieldset>`;
 }
 
@@ -654,9 +947,26 @@ function lamalCatalogueScript(): string {
         }
 
         var pending = 0;
+
+        /**
+         * Ce qui manque encore, dit explicitement.
+         *
+         * Un tiret muet laissait croire à une panne : la prime exige quatre
+         * choix, et l'assuré n'est pas rattaché tout seul quand la police ne
+         * porte pas de numéro AVS. Autant nommer le champ qui bloque.
+         */
+        function missingField() {
+          if (client && !client.value) { return 'Choisissez l\\'assuré pour voir la prime.'; }
+          if (!insurer.value) { return 'Choisissez votre caisse pour voir la prime.'; }
+          if (!model.value) { return 'Choisissez votre modèle pour voir la prime.'; }
+          if (!franchise.value) { return 'Choisissez votre franchise pour voir la prime.'; }
+          return null;
+        }
+
         function refreshPremium() {
-          if (!insurer.value || !model.value || !franchise.value || !client || !client.value) {
-            readout.textContent = '—';
+          var missing = missingField();
+          if (missing) {
+            readout.textContent = missing;
             return;
           }
           var params = new URLSearchParams({
@@ -671,15 +981,26 @@ function lamalCatalogueScript(): string {
           fetch('/espace/assurances/lamal/prime?' + params.toString(), {
             headers: { Accept: 'application/json' }
           })
-            .then(function (response) { return response.ok ? response.json() : null; })
+            // Le corps est lu même en cas d'erreur : le serveur y explique
+            // pourquoi il ne peut pas calculer — une date de naissance qui
+            // manque, par exemple — et ce motif vaut mieux qu'un « introuvable »
+            // que personne ne peut interpréter.
+            .then(function (response) {
+              return response.json().catch(function () { return null; });
+            })
             .then(function (data) {
               // Une réponse arrivée après une saisie plus récente est périmée.
               if (ticket !== pending) { return; }
-              readout.textContent = data && typeof data.monthly === 'number'
-                ? data.monthly.toFixed(2) + ' CHF / mois'
-                : 'Tarif introuvable pour ces critères';
+              if (data && typeof data.monthly === 'number') {
+                readout.textContent = data.monthly.toFixed(2) + ' CHF / mois';
+              } else {
+                readout.textContent = (data && data.message)
+                  || 'Tarif introuvable pour ces critères';
+              }
             })
-            .catch(function () { if (ticket === pending) { readout.textContent = '—'; } });
+            .catch(function () {
+              if (ticket === pending) { readout.textContent = 'Tarif momentanément indisponible'; }
+            });
         }
 
         insurer.addEventListener('change', function () { filterModels(); refreshPremium(); });

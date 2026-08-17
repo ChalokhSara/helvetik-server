@@ -2,12 +2,23 @@ import { Router, Request, Response } from 'express';
 import { Client, IClient } from '../models/client.model';
 import { User } from '../models/user.model';
 import { csrfToken } from '../utils/csrf';
+import {
+  documentsByClient,
+  listDocuments,
+  retrieveDocument
+} from '../services/document-vault.service';
+import {
+  DOCUMENT_SIDES,
+  DocumentSide,
+  SIDE_LABELS
+} from '../models/identity-document.model';
 import { isFirstClientOfHousehold, PHONE_REQUIRED_MESSAGE } from '../services/household.service';
 import { buildBaseUrl, escapeRegex, PAGE_SIZE, parsePage } from '../utils/query';
 import {
   ClientFormValues,
   clientToFormValues,
   renderClientFormPage,
+  renderClientDocumentsPage,
   renderClientListPage,
   UserOption
 } from '../views/admin-clients.view';
@@ -118,10 +129,18 @@ router.get('/', async (req: Request, res: Response) => {
       }
     }
 
+    // État du dossier d'identité, affiché dans la liste : sans les deux faces,
+    // aucune lettre de résiliation ne peut être envoyée.
+    const byClient = await documentsByClient(clients.map((c) => c.uid));
+    const documents = new Map(
+      [...byClient].map(([uid, docs]) => [uid, docs.map((d) => d.side)])
+    );
+
     res.type('html').send(renderClientListPage({
       username: adminName(req),
       clients,
       userEmails,
+      documents,
       search,
       userUid,
       csrf: csrfToken(req),
@@ -139,6 +158,7 @@ router.get('/', async (req: Request, res: Response) => {
       username: adminName(req),
       clients: [],
       userEmails: new Map(),
+      documents: new Map(),
       search,
       userUid,
       csrf: csrfToken(req),
@@ -175,9 +195,14 @@ router.post('/new', async (req: Request, res: Response) => {
       error
     }));
 
-  const birthdate = new Date(values.birthdate || '');
-  if (Number.isNaN(birthdate.getTime())) {
-    return fail('La date de naissance est invalide.');
+  // L'identité n'est plus exigée : une fiche peut n'avoir qu'un contact,
+  // une adresse et un numéro AVS tant que la pièce n'a pas été lue.
+  let birthdate: Date | undefined;
+  if (values.birthdate) {
+    birthdate = new Date(values.birthdate);
+    if (Number.isNaN(birthdate.getTime())) {
+      return fail('La date de naissance est invalide.');
+    }
   }
   if (!await User.exists({ uid: values.userUid })) {
     return fail('L\'utilisateur titulaire est introuvable.');
@@ -234,9 +259,14 @@ router.post('/:uid/edit', async (req: Request, res: Response) => {
       error
     }));
 
-  const birthdate = new Date(values.birthdate || '');
-  if (Number.isNaN(birthdate.getTime())) {
-    return fail('La date de naissance est invalide.');
+  // L'identité n'est plus exigée : une fiche peut n'avoir qu'un contact,
+  // une adresse et un numéro AVS tant que la pièce n'a pas été lue.
+  let birthdate: Date | undefined;
+  if (values.birthdate) {
+    birthdate = new Date(values.birthdate);
+    if (Number.isNaN(birthdate.getTime())) {
+      return fail('La date de naissance est invalide.');
+    }
   }
   if (!await User.exists({ uid: values.userUid })) {
     return fail('L\'utilisateur titulaire est introuvable.');
@@ -249,8 +279,10 @@ router.post('/:uid/edit', async (req: Request, res: Response) => {
     }
 
     client.userUid = values.userUid!;
-    client.name = values.name!;
-    client.firstname = values.firstname!;
+    // Les champs facultatifs vidés sont retirés, jamais enregistrés à '' :
+    // une chaîne vide échouerait sur l'énumération du sexe.
+    client.name = values.name || undefined;
+    client.firstname = values.firstname || undefined;
     client.birthdate = birthdate;
     client.email = values.email!;
     client.phone = values.phone!;
@@ -258,9 +290,9 @@ router.post('/:uid/edit', async (req: Request, res: Response) => {
     client.plz = values.plz!;
     client.location = values.location!;
     client.canton = values.canton as IClient['canton'];
-    client.nationality = values.nationality!;
+    client.nationality = values.nationality || undefined;
     client.avsNum = values.avsNum!;
-    client.sexe = values.sexe as IClient['sexe'];
+    client.sexe = (values.sexe || undefined) as IClient['sexe'];
     if (client.blocked !== values.blocked) {
       client.blocked = Boolean(values.blocked);
       client.blockedAt = values.blocked ? new Date() : undefined;
@@ -296,5 +328,58 @@ async function setBlocked(req: Request, res: Response, blocked: boolean) {
 
 router.post('/:uid/block', (req, res) => setBlocked(req, res, true));
 router.post('/:uid/unblock', (req, res) => setBlocked(req, res, false));
+
+
+// ------------------------------------------------------- pièce d'identité
+//
+// Les pièces sont conservées pour être jointes aux lettres de résiliation et
+// d'affiliation : l'exploitant doit donc pouvoir les récupérer. C'est aussi
+// l'accès le plus sensible de toute la console, d'où la trace systématique
+// laissée par retrieveDocument().
+
+router.get('/:uid/piece', async (req: Request, res: Response) => {
+  const client = await Client.findOne({ uid: req.params.uid });
+  if (!client) {
+    return res.status(404).redirect('/admin/clients');
+  }
+
+  const documents = await listDocuments(client.uid);
+  const holder = await User.findOne({ uid: client.userUid }).select('email');
+
+  res.type('html').send(renderClientDocumentsPage({
+    username: adminName(req),
+    client,
+    holderEmail: holder?.email,
+    documents
+  }));
+});
+
+router.get('/:uid/piece/:side', async (req: Request, res: Response) => {
+  const side = String(req.params.side || '').toUpperCase() as DocumentSide;
+  if (!DOCUMENT_SIDES.includes(side)) {
+    return res.status(404).type('text/plain').send('Face inconnue.');
+  }
+
+  try {
+    const document = await retrieveDocument(
+      req.params.uid, side, `console — admin ${adminName(req) || 'inconnu'}`
+    );
+    if (!document) {
+      return res.status(404).type('text/plain').send('Pièce introuvable.');
+    }
+
+    // Téléchargement plutôt qu'affichage : depuis la console, la pièce sert à
+    // être jointe à un courrier, pas à être regardée.
+    res.set({
+      'Content-Type': document.mimetype,
+      'Content-Disposition':
+        `attachment; filename="${req.params.uid}-${side.toLowerCase()}"`,
+      'Cache-Control': 'no-store, private',
+      'X-Content-Type-Options': 'nosniff'
+    }).send(document.content);
+  } catch (err) {
+    res.status(500).type('text/plain').send((err as Error).message);
+  }
+});
 
 export { router as adminClientsRouter };

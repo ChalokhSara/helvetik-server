@@ -19,6 +19,22 @@ import {
   ExtractionResult
 } from '../services/document-extraction.service';
 import { readClientPayload } from '../utils/client-payload';
+import { completeAddress, suggestAddresses } from '../services/address.service';
+import {
+  DOCUMENT_SIDES,
+  DocumentSide,
+  IIdentityDocument,
+  SIDE_LABELS
+} from '../models/identity-document.model';
+import {
+  deleteDocument,
+  documentsByClient,
+  isAcceptedDocument,
+  listDocuments,
+  retrieveDocument,
+  storeDocument,
+  VaultError
+} from '../services/document-vault.service';
 import { readInsurancePayload } from '../utils/insurance-payload';
 import { monthlyPremium, cancellationDeadline } from '../utils/insurance-payload';
 import {
@@ -27,12 +43,14 @@ import {
   HouseholdError,
   nearestLegalFranchise,
   isFirstClientOfHousehold,
+  describeClient,
   PHONE_REQUIRED_MESSAGE
 } from '../services/household.service';
 import { optimiseLamal } from '../services/lamal-optimisation.service';
 import { Catalogue, catalogueFor, premiumFor } from '../services/premium-catalogue.service';
+import { readPolicy } from '../services/policy-llm.service';
 import * as views from '../views/site/pages';
-import { Values } from '../views/site/forms';
+import { StoredSide, Values } from '../views/site/forms';
 
 const router = Router();
 
@@ -123,12 +141,30 @@ function applyExtraction(values: Values, result: ExtractionResult, keys: string[
 
 function applyToClient(values: Values, result: ExtractionResult): Values {
   return applyExtraction(values, result,
-    ['avsNum', 'birthdate', 'firstname', 'name', 'plz', 'location']);
+    ['avsNum', 'birthdate', 'firstname', 'name', 'sexe', 'nationality', 'plz', 'location']);
 }
 
 function applyToInsurance(values: Values, result: ExtractionResult): Values {
   return applyExtraction(values, result,
     ['provider', 'policyNumber', 'premiumAmount', 'franchise']);
+}
+
+/**
+ * Résumé de ce qui a été tiré d'une police, à afficher au-dessus du formulaire.
+ *
+ * Distinct de `describeExtraction` : ce qui compte ici n'est pas ce que les
+ * motifs textuels ont vu, mais ce que la lecture assistée a su rattacher au
+ * catalogue officiel — c'est cela qui remplit réellement le formulaire.
+ */
+function describePolicyReading(result: ExtractionResult, recognised: string[]): string {
+  const source = result.source === 'PDF' ? 'votre document' : 'votre photo';
+  if (!recognised.length) {
+    return `Rien n'a pu être tiré de ${source} : renseignez le contrat à la main.`;
+  }
+
+  const unique = [...new Set(recognised)];
+  return `Lu depuis ${source} : ${unique.join(', ')}. ` +
+    'Vérifiez chaque champ avant d\'enregistrer.';
 }
 
 /**
@@ -148,6 +184,33 @@ function describe(err: unknown): { message: string; fields: string[] } {
     };
   }
   return { message: 'Une erreur est survenue. Réessayez.', fields: [] };
+}
+
+/**
+ * Complète le canton depuis le NPA quand il n'a pas été choisi.
+ *
+ * Le canton n'est plus demandé dans les formulaires : il découle du NPA, et
+ * le faire choisir n'ajoute qu'une occasion de se tromper. Une saisie
+ * explicite reste prioritaire — le formulaire d'administration, lui, le pose.
+ */
+async function withDeducedCanton(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (String(body.canton || '').trim()) {
+    return body;
+  }
+
+  const completed = await completeAddress(
+    String(body.plz || '').trim(),
+    String(body.location || '').trim()
+  );
+  if (!completed.canton) {
+    return body;
+  }
+
+  return {
+    ...body,
+    canton: completed.canton,
+    location: String(body.location || '').trim() || completed.location
+  };
 }
 
 // ------------------------------------------------------------------ accueil
@@ -222,6 +285,26 @@ router.get('/deconnexion', (req: Request, res: Response) => {
   req.session.destroy(() => res.redirect('/connexion?msg=deconnecte'));
 });
 
+// ----------------------------------------------------------------- adresses
+//
+// Servies au formulaire d'inscription, donc sans authentification : elles ne
+// font que relayer un registre public, sans rien révéler du compte. La mise
+// en cache du service évite d'en faire un robinet vers swisstopo.
+
+router.get('/adresses', async (req: Request, res: Response) => {
+  const results = await suggestAddresses(String(req.query.q || ''));
+  // Sans stockage : les propositions dépendent d'une saisie, pas de l'usager.
+  res.set('Cache-Control', 'private, max-age=60').json({ results });
+});
+
+router.get('/adresses/npa', async (req: Request, res: Response) => {
+  const completed = await completeAddress(
+    String(req.query.plz || '').trim(),
+    String(req.query.location || '').trim()
+  );
+  res.set('Cache-Control', 'private, max-age=300').json(completed);
+});
+
 // -------------------------------------------------------------- inscription
 
 router.get('/inscription', async (req: Request, res: Response) => {
@@ -230,12 +313,19 @@ router.get('/inscription', async (req: Request, res: Response) => {
   }
   res.type('html').send(views.renderRegister({
     csrf: csrfToken(req),
-    values: { nationality: 'CH' }
+    values: {}
   }));
 });
 
+/**
+ * L'inscription ne demande que l'email, le mot de passe, le téléphone,
+ * l'adresse et le numéro AVS. L'identité — nom, prénom, date de naissance —
+ * est réclamée juste après, par lecture d'une pièce d'identité.
+ */
+const REGISTER_FIELDS = ['accountEmail', 'phone', 'road', 'plz', 'location', 'canton', 'avsNum'];
+
 router.post('/inscription', async (req: Request, res: Response) => {
-  const values = fieldValues(req.body, [...CLIENT_FIELDS, 'accountEmail']);
+  const values = fieldValues(req.body, REGISTER_FIELDS);
   const accountEmail = String(req.body.accountEmail || '').trim().toLowerCase();
   const password = String(req.body.password || '');
 
@@ -245,16 +335,20 @@ router.post('/inscription', async (req: Request, res: Response) => {
     );
 
   if (!EMAIL_PATTERN.test(accountEmail)) {
-    return fail('Adresse email de connexion invalide.');
+    return fail('Adresse email invalide.', 400, ['accountEmail']);
   }
   if (password.length < MIN_PASSWORD_LENGTH) {
-    return fail(`Le mot de passe doit faire au moins ${MIN_PASSWORD_LENGTH} caractères.`);
+    return fail(`Le mot de passe doit faire au moins ${MIN_PASSWORD_LENGTH} caractères.`, 400, ['password']);
   }
 
-  // L'assuré hérite de l'email du compte si le champ est laissé vide.
-  const payload = readClientPayload(req.body, { email: accountEmail });
+  const body = await withDeducedCanton({ ...req.body });
+
+  // L'assuré hérite de l'email du compte : à l'inscription, c'est la même
+  // personne, et redemander la même adresse deux fois n'a pas de sens.
+  const payload = readClientPayload(body, { email: accountEmail });
   if (payload.error || !payload.values) {
-    return fail(payload.error || 'Données incomplètes.');
+    return fail(payload.error || 'Données incomplètes.', 400,
+      payload.field ? [payload.field] : []);
   }
 
   // Le téléphone est facultatif pour les membres ajoutés ensuite, mais celui
@@ -308,9 +402,11 @@ router.post('/inscription', async (req: Request, res: Response) => {
       }
       req.session.siteUserUid = user.uid;
       user.lastLoginDate = new Date();
+      // Enchaîner sur la pièce d'identité : c'est le moment où l'assuré est
+      // encore engagé, et il ne reste qu'une photo à prendre.
       user.save()
-        .then(() => res.redirect('/espace?msg=bienvenue'))
-        .catch(() => res.redirect('/espace?msg=bienvenue'));
+        .then(() => res.redirect('/espace/identite'))
+        .catch(() => res.redirect('/espace/identite'));
     });
   } catch (err) {
     console.error('Erreur d\'inscription (site):', err);
@@ -369,8 +465,10 @@ router.get('/espace', async (req: Request, res: Response) => {
           }
         : undefined,
       savings,
+      incomplete: clients.filter((client) => !client.birthdate),
       notice: ({
         ok: 'Modifications enregistrées.',
+        identite: 'Identité enregistrée.',
         bienvenue: 'Bienvenue ! Votre compte est prêt : commencez par ajouter votre assurance de base.'
       } as Record<string, string>)[String(req.query.msg || '')]
     }));
@@ -390,11 +488,18 @@ router.get('/espace/assures', async (req: Request, res: Response) => {
     { $group: { _id: '$clientUid', n: { $sum: 1 } } }
   ]);
 
+  const documents = await documentsByClient(clients.map((c) => c.uid));
+
   res.type('html').send(views.renderClients({
     email: user.email,
     clients,
     insuranceCount: new Map(counts.map((c) => [c._id, c.n])),
-    notice: String(req.query.msg || '') === 'ok' ? 'Assuré enregistré.' : undefined
+    documentCount: new Map([...documents].map(([uid, list]) => [uid, list.length])),
+    notice: ({
+      ok: 'Assuré enregistré.',
+      identite: 'Identité enregistrée.',
+      supprimee: 'Pièce supprimée.'
+    } as Record<string, string>)[String(req.query.msg || '')]
   }));
 });
 
@@ -408,13 +513,333 @@ async function householdAddress(userUid: string) {
     return undefined;
   }
   return {
-    label: `${reference.firstname} ${reference.name}`,
+    label: describeClient(reference),
     road: reference.road,
     plz: reference.plz,
     location: reference.location,
     canton: reference.canton
   };
 }
+
+// -------------------------------------------------------- pièce d'identité
+//
+// L'inscription se limite au contact et à l'adresse. L'identité est renseignée
+// ici, par lecture de la pièce déposée.
+//
+// Les deux faces sont **conservées**, chiffrées : une lettre de résiliation ou
+// d'affiliation doit être accompagnée d'une copie de la pièce, faute de quoi la
+// caisse la refuse. Ce n'est donc plus une analyse jetable, et le coffre
+// (document-vault.service) porte les précautions correspondantes.
+//
+// Les routes sont écrites pour un assuré quelconque du foyer ; /espace/identite
+// n'est qu'un raccourci vers celle du titulaire.
+
+const IDENTITY_FIELDS = ['firstname', 'name', 'birthdate', 'sexe', 'nationality'];
+
+/** Fiche du titulaire du compte : la plus ancienne, donc la première créée. */
+async function accountHolder(userUid: string): Promise<IClient | null> {
+  return Client.findOne({ userUid }).sort({ _id: 1 });
+}
+
+function identityValues(client: IClient): Values {
+  return {
+    firstname: client.firstname || '',
+    name: client.name || '',
+    birthdate: client.birthdate ? client.birthdate.toISOString().slice(0, 10) : '',
+    sexe: client.sexe || '',
+    nationality: client.nationality || ''
+  };
+}
+
+function storedSides(documents: IIdentityDocument[]): StoredSide[] {
+  return documents.map((d) => ({
+    side: d.side,
+    filename: d.filename,
+    size: d.size,
+    uploadedAt: d.uploadedAt
+  }));
+}
+
+/**
+ * Assuré visé par la route, et le fait qu'il s'agisse ou non du titulaire.
+ *
+ * Le filtre porte toujours le userUid : la pièce d'identité d'un autre foyer
+ * doit être introuvable, pas seulement interdite.
+ */
+async function identityTarget(
+  req: Request
+): Promise<{ client: IClient; isHolder: boolean } | null> {
+  const user = req.siteUser!;
+  const uid = req.params.uid;
+
+  if (!uid) {
+    const client = await accountHolder(user.uid);
+    return client ? { client, isHolder: true } : null;
+  }
+
+  const client = await Client.findOne({ uid, userUid: user.uid });
+  if (!client) {
+    return null;
+  }
+  const holder = await accountHolder(user.uid);
+  return { client, isHolder: holder?.uid === client.uid };
+}
+
+/** Face demandée dans l'URL, refusée si elle n'existe pas. */
+function readSide(value: string): DocumentSide | null {
+  const side = String(value || '').toUpperCase();
+  return DOCUMENT_SIDES.includes(side as DocumentSide) ? (side as DocumentSide) : null;
+}
+
+async function renderIdentityPage(
+  req: Request,
+  res: Response,
+  target: { client: IClient; isHolder: boolean },
+  extra: {
+    values?: Values;
+    error?: string;
+    info?: string;
+    warnings?: string[];
+    invalidFields?: string[];
+    status?: number;
+  } = {}
+) {
+  const user = req.siteUser!;
+  const documents = await listDocuments(target.client.uid);
+
+  res.status(extra.status ?? 200).type('html').send(views.renderIdentity({
+    email: user.email,
+    csrf: csrfToken(req),
+    values: extra.values ?? identityValues(target.client),
+    clientUid: target.isHolder ? undefined : target.client.uid,
+    clientLabel: target.isHolder ? undefined : describeClient(target.client),
+    stored: storedSides(documents),
+    fresh: target.isHolder && !target.client.birthdate,
+    error: extra.error,
+    info: extra.info ?? (String(req.query.msg || '') === 'supprimee'
+      ? 'Pièce supprimée.'
+      : undefined),
+    warnings: extra.warnings,
+    invalidFields: extra.invalidFields
+  }));
+}
+
+/** Affichage : titulaire par défaut, ou un membre du foyer désigné. */
+async function showIdentity(req: Request, res: Response) {
+  const target = await identityTarget(req);
+  if (!target) {
+    return res.redirect(req.params.uid ? '/espace/assures' : '/espace/assures/nouveau');
+  }
+  await renderIdentityPage(req, res, target);
+}
+
+/**
+ * Dépôt d'une face : elle est chiffrée et conservée, puis soumise à la
+ * reconnaissance de texte pour pré-remplir l'identité.
+ *
+ * L'ordre importe : le document est enregistré **avant** l'analyse. Une
+ * reconnaissance qui échoue ne doit pas faire perdre la photo, souvent la
+ * partie la plus pénible à refaire.
+ */
+async function depositIdentityDocument(req: Request, res: Response) {
+  const user = req.siteUser!;
+  const target = await identityTarget(req);
+
+  if (!target) {
+    if (req.file) {
+      await unlink(req.file.path).catch(() => undefined);
+    }
+    return res.redirect(req.params.uid ? '/espace/assures' : '/espace/assures/nouveau');
+  }
+
+  const side = readSide(String(req.body?.side || ''));
+  const file = req.file;
+
+  try {
+    if (!side) {
+      return await renderIdentityPage(req, res, target, {
+        error: 'Face inconnue : indiquez le recto ou le verso.', status: 400
+      });
+    }
+    if (!file) {
+      return await renderIdentityPage(req, res, target, {
+        error: `Aucun fichier reçu pour le ${SIDE_LABELS[side]}.`, status: 400
+      });
+    }
+    if (!isAcceptedDocument(file.mimetype, file.originalname)) {
+      return await renderIdentityPage(req, res, target, {
+        error: 'Format non pris en charge : déposez une photo (JPEG, PNG) ou un PDF.',
+        status: 400
+      });
+    }
+
+    const stored = await storeDocument({
+      userUid: user.uid,
+      clientUid: target.client.uid,
+      side,
+      path: file.path,
+      filename: file.originalname,
+      mimetype: file.mimetype
+    });
+
+    // La reconnaissance ne porte que sur ce qui vient d'être déposé. Le verso
+    // porte la bande MRZ, donc l'essentiel ; le recto n'apporte souvent qu'une
+    // confirmation, mais rien n'oblige l'assuré à respecter l'ordre.
+    const values = identityValues(target.client);
+    const warnings: string[] = [];
+    let info = stored.replaced
+      ? `Le ${SIDE_LABELS[side]} a remplacé la pièce précédente.`
+      : `Le ${SIDE_LABELS[side]} est enregistré.`;
+
+    try {
+      const result = await extractFromDocument(file.path, file.mimetype, file.originalname);
+      // Ce qui est lu prime sur les valeurs déjà en base : l'assuré vient
+      // précisément de fournir la pièce pour les corriger.
+      let recognised = false;
+      for (const key of IDENTITY_FIELDS) {
+        const field = (result.fields as Record<string, { value: string } | undefined>)[key];
+        if (field) {
+          values[key] = field.value;
+          recognised = true;
+        }
+      }
+      warnings.push(...result.warnings);
+      info += recognised
+        ? ` ${describeExtraction(result)}`
+        : ' Aucune donnée n\'a pu en être lue : la bande de caractères figure au verso. ' +
+          'Vous pouvez aussi saisir les champs à la main.';
+    } catch (err) {
+      // Le document est conservé quand même : c'est le but premier du dépôt.
+      warnings.push(
+        `La pièce est enregistrée, mais n'a pas pu être analysée (${(err as Error).message})`
+      );
+    }
+
+    await renderIdentityPage(req, res, target, { values, info, warnings });
+  } catch (err) {
+    console.error('Erreur de dépôt de pièce d\'identité:', err);
+    await renderIdentityPage(req, res, target, {
+      error: err instanceof VaultError
+        ? err.message
+        : 'La pièce n\'a pas pu être enregistrée. Réessayez.',
+      status: 400
+    });
+  } finally {
+    if (file) {
+      await unlink(file.path).catch(() => undefined);
+    }
+  }
+}
+
+/**
+ * Restitution d'une pièce à son propriétaire.
+ *
+ * Jamais mise en cache : une copie dans le cache du navigateur ou d'un proxy
+ * intermédiaire survivrait à la déconnexion.
+ */
+async function serveIdentityDocument(req: Request, res: Response) {
+  const user = req.siteUser!;
+  const target = await identityTarget(req);
+  const side = readSide(req.params.side);
+
+  if (!target || !side) {
+    return res.status(404).type('text/plain').send('Pièce introuvable.');
+  }
+
+  try {
+    const document = await retrieveDocument(
+      target.client.uid, side, `assuré ${user.uid}`
+    );
+    if (!document) {
+      return res.status(404).type('text/plain').send('Pièce introuvable.');
+    }
+
+    res.set({
+      'Content-Type': document.mimetype,
+      'Content-Disposition': `inline; filename="${side.toLowerCase()}"`,
+      'Cache-Control': 'no-store, private',
+      'X-Content-Type-Options': 'nosniff',
+      // Une pièce d'identité n'a rien à faire dans le cadre d'une autre page.
+      'Content-Security-Policy': "default-src 'none'; img-src 'self'; frame-ancestors 'none'"
+    }).send(document.content);
+  } catch (err) {
+    res.status(500).type('text/plain').send((err as Error).message);
+  }
+}
+
+async function removeIdentityDocument(req: Request, res: Response) {
+  const target = await identityTarget(req);
+  const side = readSide(req.params.side);
+
+  if (!target || !side) {
+    return res.redirect('/espace/assures');
+  }
+
+  await deleteDocument(target.client.uid, side);
+  res.redirect(target.isHolder
+    ? '/espace/identite?msg=supprimee'
+    : `/espace/assures/${target.client.uid}/piece?msg=supprimee`);
+}
+
+/** Enregistrement de l'identité relue par l'assuré. */
+async function saveIdentity(req: Request, res: Response) {
+  const target = await identityTarget(req);
+  if (!target) {
+    return res.redirect(req.params.uid ? '/espace/assures' : '/espace/assures/nouveau');
+  }
+
+  const client = target.client;
+  const values = fieldValues(req.body, IDENTITY_FIELDS);
+  const fail = (error: string, invalidFields: string[] = []) =>
+    renderIdentityPage(req, res, target, { values, error, invalidFields, status: 400 });
+
+  const rawBirthdate = String(values.birthdate || '');
+  if (rawBirthdate) {
+    const birthdate = new Date(rawBirthdate);
+    if (Number.isNaN(birthdate.getTime())) {
+      return fail('La date de naissance est invalide.', ['birthdate']);
+    }
+    if (birthdate.getTime() > Date.now()) {
+      return fail('La date de naissance ne peut pas être dans le futur.', ['birthdate']);
+    }
+    client.birthdate = birthdate;
+  } else {
+    client.birthdate = undefined;
+  }
+
+  // Un champ vidé est retiré plutôt qu'enregistré à '' : une chaîne vide
+  // échouerait sur l'énumération du sexe, et ferait passer une fiche
+  // incomplète pour une fiche remplie.
+  client.firstname = String(values.firstname || '') || undefined;
+  client.name = String(values.name || '') || undefined;
+  client.sexe = (String(values.sexe || '') || undefined) as IClient['sexe'];
+  client.nationality = String(values.nationality || '') || undefined;
+
+  try {
+    await client.save();
+    res.redirect(target.isHolder ? '/espace?msg=identite' : '/espace/assures?msg=identite');
+  } catch (err) {
+    console.error('Erreur d\'enregistrement de l\'identité (site):', err);
+    const d = describe(err);
+    fail(d.message, d.fields);
+  }
+}
+
+// Titulaire du compte.
+router.get('/espace/identite', showIdentity);
+router.post('/espace/identite/deposer', upload.single('document'), verifyUploadCsrf,
+  depositIdentityDocument);
+router.get('/espace/identite/:side(recto|verso)', serveIdentityDocument);
+router.post('/espace/identite/:side(recto|verso)/supprimer', removeIdentityDocument);
+router.post('/espace/identite', saveIdentity);
+
+// N'importe quel assuré du foyer : conjoint, enfant.
+router.get('/espace/assures/:uid/piece', showIdentity);
+router.post('/espace/assures/:uid/piece/deposer', upload.single('document'), verifyUploadCsrf,
+  depositIdentityDocument);
+router.get('/espace/assures/:uid/piece/:side(recto|verso)', serveIdentityDocument);
+router.post('/espace/assures/:uid/piece/:side(recto|verso)/supprimer', removeIdentityDocument);
+router.post('/espace/assures/:uid/piece', saveIdentity);
 
 router.get('/espace/assures/nouveau', async (req: Request, res: Response) => {
   const user = req.siteUser!;
@@ -449,9 +874,9 @@ router.post('/espace/assures/nouveau', async (req: Request, res: Response) => {
       })
     );
 
-  const payload = readClientPayload(req.body, { email: user.email });
+  const payload = readClientPayload(await withDeducedCanton({ ...req.body }), { email: user.email });
   if (payload.error || !payload.values) {
-    return fail(payload.error || 'Données incomplètes.');
+    return fail(payload.error || 'Données incomplètes.', 400, payload.field ? [payload.field] : []);
   }
 
   try {
@@ -536,16 +961,29 @@ router.post('/espace/assures/:uid/modifier', async (req: Request, res: Response)
       email: user.email, csrf: csrfToken(req), uid: req.params.uid, values, error, invalidFields
     }));
 
-  const payload = readClientPayload(req.body, { email: user.email });
+  const payload = readClientPayload(await withDeducedCanton({ ...req.body }), { email: user.email });
   if (payload.error || !payload.values) {
-    return fail(payload.error || 'Données incomplètes.');
+    return fail(payload.error || 'Données incomplètes.', 400, payload.field ? [payload.field] : []);
+  }
+
+  // Un champ facultatif vidé doit disparaître de la fiche. Mongo ignore
+  // purement et simplement les clés à undefined dans un $set : sans $unset
+  // explicite, effacer un prénom ne ferait rien du tout.
+  const set: Record<string, unknown> = {};
+  const unset: Record<string, ''> = {};
+  for (const [key, value] of Object.entries(payload.values)) {
+    if (value === undefined) {
+      unset[key] = '';
+    } else {
+      set[key] = value;
+    }
   }
 
   try {
     // Le filtre porte le userUid : un assuré d'un autre foyer est introuvable.
     const result = await Client.findOneAndUpdate(
       { uid: req.params.uid, userUid: user.uid },
-      { $set: payload.values },
+      { $set: set, ...(Object.keys(unset).length ? { $unset: unset } : {}) },
       { new: true, runValidators: true }
     );
     if (!result) {
@@ -560,9 +998,83 @@ router.post('/espace/assures/:uid/modifier', async (req: Request, res: Response)
 
 // -------------------------------------------------------------- assurances
 
+/**
+ * Assuré retenu d'office quand le foyer n'en compte qu'un.
+ *
+ * Le calcul de la prime dépend de l'assuré — c'est son âge qui fixe le tarif.
+ * Laisser le champ vide dans un foyer d'une personne bloquait l'affichage de
+ * la prime sans qu'aucun choix ne reste à faire.
+ */
+function onlyInsured(options: Array<[string, string]>): string | undefined {
+  return options.length === 1 ? options[0][0] : undefined;
+}
+
+/** Normalisation pour comparer des noms : sans accents, ni casse, ni ponctuation. */
+function nameKey(value: string): string {
+  return value.normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * Retrouve l'assuré désigné par une police, par son nom ou sa date de naissance.
+ *
+ * Beaucoup de polices ne portent aucun numéro AVS — celle de Sanitas n'en a
+ * pas — mais toutes nomment la personne assurée. Le nom suffit dans un foyer,
+ * où l'on ne compte pas deux homonymes ; la date de naissance sert d'appoint
+ * quand la reconnaissance de texte a abîmé l'orthographe.
+ */
+async function matchInsured(
+  userUid: string,
+  name?: string,
+  birthdate?: string
+): Promise<IClient | null> {
+  const clients = await Client.find({ userUid });
+  if (!clients.length) {
+    return null;
+  }
+
+  if (name) {
+    const wanted = nameKey(name);
+    const parts = wanted.split(' ').filter((part) => part.length >= 3);
+
+    // Le nom complet d'abord, dans les deux ordres : les polices écrivent
+    // aussi bien « Sara Chalokh » que « Chalokh Sara ».
+    const exact = clients.find((client) => {
+      const full = nameKey([client.firstname, client.name].filter(Boolean).join(' '));
+      const reversed = nameKey([client.name, client.firstname].filter(Boolean).join(' '));
+      return full === wanted || reversed === wanted;
+    });
+    if (exact) {
+      return exact;
+    }
+
+    // À défaut, tous les mots significatifs du nom de l'assuré doivent
+    // apparaître : « Sara Caroline Chalokh » reconnaît « Sara Chalokh ».
+    const partial = clients.filter((client) => {
+      const full = ` ${nameKey([client.firstname, client.name].filter(Boolean).join(' '))} `;
+      return parts.length > 0 && parts.every((part) => full.includes(` ${part} `));
+    });
+    if (partial.length === 1) {
+      return partial[0];
+    }
+  }
+
+  // Dernier recours : la date de naissance, si elle ne désigne qu'une personne.
+  if (birthdate) {
+    const day = new Date(birthdate);
+    const sameDay = clients.filter((client) => client.birthdate &&
+      client.birthdate.toISOString().slice(0, 10) === day.toISOString().slice(0, 10));
+    if (sameDay.length === 1) {
+      return sameDay[0];
+    }
+  }
+
+  return null;
+}
+
 async function insuredOptions(userUid: string): Promise<Array<[string, string]>> {
   const clients = await Client.find({ userUid }).sort({ birthdate: 1 });
-  return clients.map((c) => [c.uid, `${c.firstname} ${c.name}`] as [string, string]);
+  return clients.map((c) => [c.uid, describeClient(c)] as [string, string]);
 }
 
 /**
@@ -622,6 +1134,14 @@ async function applyLamalCatalogue(
 
   // La franchise saisie est ramenée à une valeur légale pour l'âge : les
   // listes affichent toutes les franchises, adultes et enfants confondus.
+  // Sans date de naissance, impossible de savoir si la franchise enfant
+  // s'applique : on la demande ici plutôt que d'en choisir une au hasard.
+  if (!client.birthdate) {
+    return {
+      error: 'Ajoutez d\'abord la date de naissance de cet assuré : elle détermine la franchise et la prime.',
+      field: 'franchise'
+    };
+  }
   const age = ageAt(client.birthdate, new Date());
   const requested = Number.parseInt(String(body.franchise ?? ''), 10);
   if (!Number.isFinite(requested)) {
@@ -696,6 +1216,8 @@ router.get('/espace/assurances', async (req: Request, res: Response) => {
 
 router.get('/espace/assurances/nouvelle', async (req: Request, res: Response) => {
   const user = req.siteUser!;
+  const insured = await insuredOptions(user.uid);
+
   res.type('html').send(views.renderInsuranceForm({
     email: user.email,
     csrf: csrfToken(req),
@@ -704,9 +1226,9 @@ router.get('/espace/assurances/nouvelle', async (req: Request, res: Response) =>
       status: 'ACTIVE',
       premiumFrequency: 'MENSUEL',
       autoRenew: true,
-      clientUid: String(req.query.assure || '')
+      clientUid: String(req.query.assure || '') || onlyInsured(insured)
     },
-    insuredOptions: await insuredOptions(user.uid),
+    insuredOptions: insured,
     catalogue: await householdCatalogue(user.uid)
   }));
 });
@@ -768,7 +1290,20 @@ router.post('/espace/assurances/nouvelle', async (req: Request, res: Response) =
   }
 });
 
-/** Analyse un document et réaffiche le formulaire de contrat pré-rempli. */
+/**
+ * Dépôt d'une police : fichier → reconnaissance optique → modèle de langage →
+ * formulaire pré-rempli.
+ *
+ * La reconnaissance optique rend un texte brut et désordonné ; c'est le modèle
+ * local qui en tire une caisse, un modèle d'assurance, une franchise et une
+ * prime. Sa réponse est ensuite confrontée au catalogue officiel : rien de ce
+ * qu'il invente ne parvient jusqu'au formulaire.
+ *
+ * Trois filets successifs, du plus précis au plus fruste :
+ *   1. le modèle de langage, validé contre le catalogue de la région ;
+ *   2. les motifs textuels, pour le n° de police et le n° AVS ;
+ *   3. la saisie manuelle, toujours disponible.
+ */
 router.post('/espace/assurances/importer', upload.single('document'), verifyUploadCsrf,
   async (req: Request, res: Response) => {
     const user = req.siteUser!;
@@ -776,12 +1311,18 @@ router.post('/espace/assurances/importer', upload.single('document'), verifyUplo
       type: 'LAMAL', status: 'ACTIVE', premiumFrequency: 'MENSUEL', autoRenew: true
     };
 
+    // Le catalogue doit accompagner **tous** les rendus : sans lui, le
+    // formulaire retombe sur la saisie libre et l'assuré perd les listes de
+    // caisses et de modèles qu'il avait sous les yeux une seconde plus tôt.
+    const catalogue = await householdCatalogue(user.uid);
+
     const render = async (values: Values, extra: { error?: string; info?: string; warnings?: string[] } = {}) =>
       res.type('html').send(views.renderInsuranceForm({
         email: user.email,
         csrf: csrfToken(req),
         values,
         insuredOptions: await insuredOptions(user.uid),
+        catalogue,
         ...extra
       }));
 
@@ -794,25 +1335,125 @@ router.post('/espace/assurances/importer', upload.single('document'), verifyUplo
       if (!isSupportedDocument(file.mimetype, file.originalname)) {
         return render(base, { error: 'Format non pris en charge : déposez une photo ou un PDF.' });
       }
+
       const result = await extractFromDocument(file.path, file.mimetype, file.originalname);
       const values = applyToInsurance(base, result);
+      const warnings = [...result.warnings];
+      const recognised: string[] = [];
+
+      // Ce que les motifs textuels ont déjà trouvé compte dans le résumé : le
+      // n° AVS a un format strict, donc fiable, et le n° de police est repéré
+      // par son étiquette. Les annoncer évite de dire « rien n'a été lu » sur
+      // un formulaire où deux champs sont pourtant remplis.
+      let avsNum = result.fields.avsNum?.value;
+      let insuredName: string | undefined;
+      let insuredBirthdate: string | undefined;
+      if (avsNum) {
+        recognised.push('n° AVS');
+      }
+      if (values.policyNumber) {
+        recognised.push('n° de police');
+      }
+
+      if (catalogue) {
+        // L'âge sert à départager deux modèles d'une même famille par le
+        // montant de leur prime. Celui de l'assuré de référence : dans un
+        // foyer d'une personne c'est le bon, et ailleurs un âge inexact ne
+        // fait qu'empêcher le calcul de tomber juste — jamais de le fausser.
+        const reference = await Client.findOne({ userUid: user.uid }).sort({ birthdate: 1 });
+        const age = reference?.birthdate ? ageAt(reference.birthdate, new Date()) : undefined;
+
+        const reading = await readPolicy(result.text, catalogue, age);
+
+        if (reading) {
+          warnings.push(...reading.warnings);
+          recognised.push(...reading.recognised);
+
+          // Les champs du formulaire LAMal ne sont pas ceux du modèle générique :
+          // la caisse et l'offre sont choisies dans le catalogue, pas saisies.
+          if (reading.insurerId !== undefined) {
+            values.lamalInsurerId = String(reading.insurerId);
+            values.provider = reading.insurerName;
+          }
+          if (reading.tariffCode) {
+            values.lamalTariffCode = reading.tariffCode;
+          }
+          if (reading.franchise !== undefined) {
+            values.franchise = String(reading.franchise);
+          }
+          if (reading.premiumAmount !== undefined) {
+            values.premiumAmount = String(reading.premiumAmount);
+          }
+          if (reading.policyNumber) {
+            values.policyNumber = reading.policyNumber;
+          }
+          if (reading.employerAccidentCoverage !== undefined) {
+            values.employerAccidentCoverage = reading.employerAccidentCoverage;
+          }
+          if (reading.startDate) {
+            values.startDate = reading.startDate;
+          }
+          // Les précisions de la police — médecin coordonnateur et son adresse,
+          // réseau de soins, intermédiaire — n'ont pas de champ à elles mais
+          // sont utiles le jour où il faut résilier ou changer de modèle.
+          if (reading.notes) {
+            values.description = reading.notes;
+          }
+          avsNum = avsNum || reading.avsNum;
+          insuredName = reading.insuredName;
+          insuredBirthdate = reading.insuredBirthdate;
+        } else {
+          warnings.push(
+            'La lecture assistée n\'était pas disponible : seuls les éléments les plus ' +
+            'simples ont été repris. Vérifiez la caisse, le modèle et la franchise.'
+          );
+        }
+      } else {
+        warnings.push(
+          'Les tarifs officiels ne sont pas disponibles pour votre région : la caisse ' +
+          'et le modèle doivent être saisis à la main.'
+        );
+      }
 
       // Le document désigne souvent une personne : on tente de la retrouver
       // dans le foyer par son numéro AVS, qui est sans ambiguïté.
-      const warnings = [...result.warnings];
-      if (result.fields.avsNum) {
-        const match = await Client.findOne({ userUid: user.uid, avsNum: result.fields.avsNum.value });
+      const insured = await insuredOptions(user.uid);
+
+      // Rattachement de la police à une personne du foyer, du repère le plus
+      // sûr au plus souple : le numéro AVS quand il figure, sinon le nom que
+      // toutes les polices portent, sinon la date de naissance.
+      if (avsNum) {
+        const match = await Client.findOne({ userUid: user.uid, avsNum });
         if (match) {
           values.clientUid = match.uid;
         } else {
           warnings.push(
-            `Le numéro AVS ${result.fields.avsNum.value} ne correspond à aucun assuré de votre foyer : ` +
+            `Le numéro AVS ${avsNum} ne correspond à aucun assuré de votre foyer : ` +
             'choisissez la personne concernée.'
           );
         }
       }
+      if (!values.clientUid && (insuredName || insuredBirthdate)) {
+        const match = await matchInsured(user.uid, insuredName, insuredBirthdate);
+        if (match) {
+          values.clientUid = match.uid;
+          recognised.push('assuré');
+        } else if (insuredName) {
+          warnings.push(
+            `La police est au nom de « ${insuredName} », qui ne correspond à aucun ` +
+            'assuré de votre foyer : choisissez la personne concernée.'
+          );
+        }
+      }
 
-      await render(values, { info: describeExtraction(result), warnings });
+      // Beaucoup de polices ne portent aucun numéro AVS : sans ce repli, le
+      // champ « assuré » restait vide et la prime ne s'affichait pas, alors
+      // qu'aucun choix ne se posait réellement.
+      if (!values.clientUid) {
+        values.clientUid = onlyInsured(insured);
+      }
+
+      await render(values, { info: describePolicyReading(result, recognised), warnings });
     } catch (err) {
       await render(base, { error: (err as Error).message });
     } finally {
@@ -924,6 +1565,13 @@ router.get('/espace/assurances/lamal/prime', async (req: Request, res: Response)
     const catalogue = await householdCatalogue(user.uid);
     if (!catalogue) {
       return res.status(404).json({ code: 'NO_PREMIUM_DATA', message: 'Tarifs indisponibles.' });
+    }
+
+    if (!client.birthdate) {
+      return res.status(400).json({
+        code: 'BIRTHDATE_REQUIRED',
+        message: 'La date de naissance de cet assuré est nécessaire pour calculer la prime.'
+      });
     }
 
     const age = ageAt(client.birthdate, new Date());

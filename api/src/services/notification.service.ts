@@ -6,6 +6,7 @@ import {
   REMINDER_MILESTONES
 } from '../models/notification.model';
 import { cancellationDeadline } from '../utils/insurance-payload';
+import { describeClient } from './household.service';
 import { sendCancellationReminder } from '../utils/mailer';
 
 /** Au-delà, on cesse de réessayer un envoi qui échoue systématiquement. */
@@ -114,7 +115,7 @@ async function materializeReminders(now: Date): Promise<{ scanned: number; creat
         scheduledFor: now,
         snapshot: {
           email: user.email,
-          insuredName: `${client.firstname} ${client.name}`,
+          insuredName: describeClient(client),
           provider: insurance.provider,
           productName: insurance.productName,
           policyNumber: insurance.policyNumber,

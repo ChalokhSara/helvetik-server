@@ -4,6 +4,12 @@
 
 import { CANTONS, IClient } from '../models/client.model';
 import {
+  DOCUMENT_SIDES,
+  DocumentSide,
+  IIdentityDocument,
+  SIDE_LABELS
+} from '../models/identity-document.model';
+import {
   alertBlock,
   consolePage,
   csrfField,
@@ -33,12 +39,28 @@ export interface ClientListOptions {
   clients: IClient[];
   /** Email du titulaire, par uid — les clients ne portent qu'un userUid. */
   userEmails: Map<string, string>;
+  /** Faces de pièce d'identité déposées, par uid de client. */
+  documents: Map<string, DocumentSide[]>;
   search: string;
   userUid: string;
   csrf: string;
   page: PageInfo;
   error?: string;
   notice?: string;
+}
+
+/**
+ * État du dossier d'identité : c'est lui qui décide si une lettre de
+ * résiliation peut partir, la caisse exigeant une copie des deux faces.
+ */
+function documentBadge(sides: DocumentSide[] = []): string {
+  if (sides.length >= 2) {
+    return '<span class="badge ok">Recto + verso</span>';
+  }
+  if (sides.length === 1) {
+    return `<span class="badge">${escapeHtml(SIDE_LABELS[sides[0]])} seul</span>`;
+  }
+  return '<span class="badge blocked">Aucune</span>';
 }
 
 export function renderClientListPage(options: ClientListOptions): string {
@@ -55,13 +77,14 @@ export function renderClientListPage(options: ClientListOptions): string {
           <th>Email</th>
           <th>Canton</th>
           <th>Naissance</th>
+          <th>Pièce d'identité</th>
           <th>Titulaire</th>
           <th>Statut</th>
           <th></th>
         </tr>
       </thead>
       <tbody>
-${options.clients.map((client) => renderClientRow(client, options.userEmails, options.csrf)).join('\n')}
+${options.clients.map((client) => renderClientRow(client, options.userEmails, options.documents.get(client.uid) || [], options.csrf)).join('\n')}
       </tbody>
     </table>
 ${renderPagination(options.page)}`;
@@ -84,11 +107,16 @@ ${clearFilter}      <a class="btn-primary" href="/admin/clients/new">Nouveau cli
 ${body}`);
 }
 
-function renderClientRow(client: IClient, userEmails: Map<string, string>, csrf: string): string {
+function renderClientRow(
+  client: IClient,
+  userEmails: Map<string, string>,
+  sides: DocumentSide[],
+  csrf: string
+): string {
   const uid = escapeHtml(client.uid);
   const action = client.blocked ? 'unblock' : 'block';
   const actionLabel = client.blocked ? 'Débloquer' : 'Bloquer';
-  const fullName = `${client.firstname} ${client.name}`;
+  const fullName = [client.firstname, client.name].filter(Boolean).join(' ') || 'Identité à compléter';
   const holder = userEmails.get(client.userUid);
 
   return `        <tr>
@@ -96,6 +124,9 @@ function renderClientRow(client: IClient, userEmails: Map<string, string>, csrf:
           <td>${escapeHtml(client.email)}</td>
           <td>${escapeHtml(client.canton)}</td>
           <td>${formatDate(client.birthdate)}</td>
+          <td>${documentBadge(sides)}${sides.length
+            ? ` <a href="/admin/clients/${uid}/piece">Consulter</a>`
+            : ''}</td>
           <td>${holder
             ? `<a href="/admin/clients?userUid=${escapeHtml(client.userUid)}">${escapeHtml(holder)}</a>`
             : `<span class="muted">${escapeHtml(client.userUid)}</span>`}</td>
@@ -201,17 +232,21 @@ ${alertBlock(options.error)}
 
       <fieldset>
         <legend>Identité</legend>
+        <p class="muted">Facultative : elle est renseignée par lecture de la pièce
+        d'identité depuis l'espace de l'assuré. Sans date de naissance, la fiche est
+        écartée de la comparaison de primes.</p>
         <div class="grid">
-${text('firstname', 'Prénom', 'type="text" autofocus')}
-${text('name', 'Nom', 'type="text"')}
-${text('birthdate', 'Date de naissance', 'type="date"')}
+${text('firstname', 'Prénom', 'type="text" autofocus', false)}
+${text('name', 'Nom', 'type="text"', false)}
+${text('birthdate', 'Date de naissance', 'type="date"', false)}
           <div>
             <label for="sexe">Sexe</label>
-            <select id="sexe" name="sexe" required>
+            <select id="sexe" name="sexe">
+              <option value="">— Non renseigné —</option>
               ${options_(SEXES, v.sexe)}
             </select>
           </div>
-${text('nationality', 'Nationalité', 'type="text"')}
+${text('nationality', 'Nationalité', 'type="text"', false)}
 ${text('avsNum', 'N° AVS', 'type="text" placeholder="756.1234.5678.90" pattern="756\\.\\d{4}\\.\\d{4}\\.\\d{2}"')}
         </div>
       </fieldset>
@@ -247,4 +282,79 @@ ${text('location', 'Localité', 'type="text"')}
         <a href="/admin/clients">Annuler</a>
       </div>
     </form>`);
+}
+
+/**
+ * Dossier d'identité d'un client, tel que la console le présente.
+ *
+ * Les fichiers ne sont pas affichés ici : ils sont téléchargés à la demande,
+ * et chaque téléchargement laisse une trace. Cette page sert à savoir ce dont
+ * on dispose avant de préparer une lettre — pas à feuilleter des cartes
+ * d'identité.
+ */
+export function renderClientDocumentsPage(options: {
+  username: string;
+  client: IClient;
+  holderEmail?: string;
+  documents: IIdentityDocument[];
+}): string {
+  const client = options.client;
+  const fullName = [client.firstname, client.name].filter(Boolean).join(' ') || client.email;
+  const byside = new Map(options.documents.map((d) => [d.side, d]));
+
+  const row = (side: DocumentSide) => {
+    const document = byside.get(side);
+    const label = SIDE_LABELS[side];
+
+    if (!document) {
+      return `        <tr>
+          <td><strong>${escapeHtml(label)}</strong></td>
+          <td colspan="4"><span class="badge blocked">Non déposé</span></td>
+        </tr>`;
+    }
+
+    const lastAccess = document.lastAccessedAt
+      ? `${formatDate(document.lastAccessedAt)} (${document.accessCount} accès)`
+      : 'jamais consulté';
+
+    return `        <tr>
+          <td><strong>${escapeHtml(label)}</strong></td>
+          <td>${escapeHtml(document.filename)}<br>
+            <span class="muted">${escapeHtml(document.mimetype)} — ${Math.round(document.size / 1024)} Ko</span></td>
+          <td>${formatDate(document.uploadedAt)}</td>
+          <td>${escapeHtml(lastAccess)}</td>
+          <td class="actions">
+            <a href="/admin/clients/${escapeHtml(client.uid)}/piece/${side.toLowerCase()}">Télécharger</a>
+          </td>
+        </tr>`;
+  };
+
+  const complete = options.documents.length >= 2;
+
+  return consolePage('Helvetik — Pièce d\'identité', { username: options.username, active: 'clients' },
+    `    <h1>Pièce d'identité — ${escapeHtml(fullName)}</h1>
+${alertBlock(
+      complete ? undefined : 'Dossier incomplet : une lettre de résiliation sans copie des deux faces sera refusée par la caisse.',
+      complete ? 'Recto et verso disponibles : le dossier peut accompagner une lettre.' : undefined
+    )}
+    <p class="muted">Titulaire : ${escapeHtml(options.holderEmail || client.userUid)} —
+    ${escapeHtml(client.road)}, ${escapeHtml(client.plz)} ${escapeHtml(client.location)}
+    (${escapeHtml(client.canton)})</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Face</th>
+          <th>Fichier</th>
+          <th>Déposé le</th>
+          <th>Dernier accès</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+${DOCUMENT_SIDES.map(row).join('\n')}
+      </tbody>
+    </table>
+    <p class="muted">Chaque téléchargement est journalisé. Les fichiers sont conservés
+    chiffrés ; seul l'assuré peut les remplacer ou les supprimer, depuis son espace.</p>
+    <div class="toolbar"><a class="muted" href="/admin/clients">Retour aux clients</a></div>`);
 }

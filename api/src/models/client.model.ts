@@ -13,9 +13,9 @@ export type Sexe = 'M' | 'F' | 'X';
 export interface IClient extends Document {
   uid: string;
   userUid: string;
-  name: string;
-  firstname: string;
-  birthdate: Date;
+  name?: string;
+  firstname?: string;
+  birthdate?: Date;
   email: string;
   /** Facultatif : exigé seulement pour le titulaire du compte. */
   phone?: string;
@@ -23,9 +23,9 @@ export interface IClient extends Document {
   plz: string;
   location: string;
   canton: Canton;
-  nationality: string;
+  nationality?: string;
   avsNum: string;
-  sexe: Sexe;
+  sexe?: Sexe;
   blocked: boolean;
   blockedAt?: Date;
 }
@@ -44,19 +44,20 @@ const clientSchema = new Schema<IClient>({
     required: true,
     index: true
   },
+  // Identité : facultative à la création du compte, que l'on veut le plus
+  // court possible. Elle est complétée ensuite, par lecture d'une pièce
+  // d'identité ou à la main. La comparaison de primes exige la date de
+  // naissance et le signale explicitement quand elle manque.
   name: {
     type: String,
-    required: [true, 'Le nom est obligatoire.'],
     trim: true
   },
   firstname: {
     type: String,
-    required: [true, 'Le prénom est obligatoire.'],
     trim: true
   },
   birthdate: {
-    type: Date,
-    required: [true, 'La date de naissance est obligatoire.']
+    type: Date
   },
   email: {
     type: String,
@@ -95,7 +96,6 @@ const clientSchema = new Schema<IClient>({
   },
   nationality: {
     type: String,
-    required: [true, 'La nationalité est obligatoire.'],
     trim: true
   },
   // Numéro AVS suisse : 756.XXXX.XXXX.XX
@@ -107,7 +107,6 @@ const clientSchema = new Schema<IClient>({
   },
   sexe: {
     type: String,
-    required: [true, 'Le sexe est obligatoire.'],
     enum: { values: ['M', 'F', 'X'], message: 'Sexe invalide.' }
   },
   // Blocage administratif : le dossier subsiste mais devient inexploitable.

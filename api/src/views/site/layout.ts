@@ -138,6 +138,21 @@ const STYLES = `
     background: var(--bg); border: 1px dashed var(--line); border-radius: 8px;
     font-weight: 700;
   }
+  /* --- propositions d'adresses --- */
+  /* La liste flotte au-dessus du formulaire : elle ne doit pas déplacer les
+     champs suivants à chaque frappe. */
+  .suggest { position: relative; }
+  .suggest-list {
+    position: absolute; z-index: 20; left: 0; right: 0; top: 100%;
+    margin: -.85rem 0 0; padding: .25rem; list-style: none;
+    max-height: 15rem; overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, .14);
+  }
+  .suggest-list[hidden] { display: none; }
+  .suggest-list li { padding: .55rem .6rem; border-radius: 6px; cursor: pointer; font-size: .92rem; }
+  .suggest-list li:hover, .suggest-list li.on { background: var(--bg); }
+
   .check { display: flex; align-items: flex-start; gap: .6rem; margin-bottom: 1rem; }
   .check input { width: auto; margin: .25rem 0 0; }
   .check label { margin: 0; font-weight: 400; font-size: .92rem; }

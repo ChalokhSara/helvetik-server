@@ -60,9 +60,16 @@ export function typeLabel(type: string): string {
 /** Assuré proposé dans le formulaire, avec son titulaire pour lever l'ambiguïté des homonymes. */
 export interface ClientOption {
   uid: string;
-  name: string;
-  firstname: string;
+  /** Peuvent manquer : l'identité est saisie après la création du compte. */
+  name?: string;
+  firstname?: string;
   userEmail?: string;
+}
+
+/** Libellé d'un assuré, tolérant à une identité incomplète. */
+export function clientLabel(client: { firstname?: string; name?: string; uid?: string }): string {
+  const full = [client.firstname, client.name].filter(Boolean).join(' ').trim();
+  return full || 'Identité à compléter';
 }
 
 function statusChip(status: string): string {
@@ -159,7 +166,7 @@ function describeClient(client: ClientOption | undefined, fallbackUid: string): 
   if (!client) {
     return escapeHtml(fallbackUid);
   }
-  return escapeHtml(`${client.firstname} ${client.name}`);
+  return escapeHtml(clientLabel(client));
 }
 
 function renderInsuranceRow(
@@ -169,7 +176,7 @@ function renderInsuranceRow(
 ): string {
   const uid = escapeHtml(insurance.uid);
   const client = clients.get(insurance.clientUid);
-  const insuredName = client ? `${client.firstname} ${client.name}` : insurance.clientUid;
+  const insuredName = client ? clientLabel(client) : insurance.clientUid;
   const renewal = insurance.autoRenew ? ' <span class="muted">(tacite)</span>' : '';
   const period = `${formatDate(insurance.startDate)} → ${formatDate(insurance.endDate)}${renewal}`;
 
@@ -297,8 +304,8 @@ export function renderInsuranceFormPage(options: InsuranceFormOptions): string {
   const clientEntries = options.clients.map((client) => ({
     value: client.uid,
     label: client.userEmail
-      ? `${client.firstname} ${client.name} — ${client.userEmail}`
-      : `${client.firstname} ${client.name}`
+      ? `${clientLabel(client)} — ${client.userEmail}`
+      : clientLabel(client)
   }));
 
   return consolePage(`Helvetik — ${title}`, { username: options.username, active: 'insurances' },
