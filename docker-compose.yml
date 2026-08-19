@@ -70,6 +70,22 @@ x-api-env: &api-env
   OLLAMA_ENABLED: ${OLLAMA_ENABLED:-true}
   OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-90000}
 
+  # Envoi des courriers par ePost (oneAPI de la Poste).
+  #
+  # EPOST_MODE=PREVIEW interroge l'API sans rien poster : elle annonce les
+  # canaux et le prix, ce qui exerce tout le chemin — jeton, multipart,
+  # adresses — sans qu'aucune lettre ne parte ni ne soit facturée.
+  # EPOST_MODE=LIVE poste réellement, en recommandé.
+  EPOST_ENABLED: ${EPOST_ENABLED:-false}
+  EPOST_MODE: ${EPOST_MODE:-PREVIEW}
+  EPOST_BASE_URL: ${EPOST_BASE_URL:-https://api.epost.ch}
+  EPOST_API_KEY: ${EPOST_API_KEY:-}
+  EPOST_USERNAME: ${EPOST_USERNAME:-}
+  EPOST_PASSWORD: ${EPOST_PASSWORD:-}
+  EPOST_TENANT_ID: ${EPOST_TENANT_ID:-}
+  EPOST_COMPANY_ID: ${EPOST_COMPANY_ID:-}
+  EPOST_POSTAGE: ${EPOST_POSTAGE:-REGISTERED}
+
   # Confirmation d'email : désactivée le temps de la phase de mesure.
   # Remettre à true rétablit le parcours complet, sans autre changement.
   # Ce réglage est aussi pilotable depuis la console d'administration.

@@ -11,6 +11,7 @@ import { startScheduler } from './config/scheduler';
 import { emailConfirmationRequired, loadSettings, startSettingsRefresh } from './config/features';
 import { checkVaultConfiguration, ensureVaultIndexes } from './services/document-vault.service';
 import { checkLlmAvailability } from './services/policy-llm.service';
+import { checkEpostConfiguration } from './services/epost.service';
 import { authRouter } from './routes/auth.routes';
 import { clientsRouter } from './routes/clients.routes';
 import { insurancesRouter } from './routes/insurances.routes';
@@ -147,6 +148,8 @@ app.listen(PORT, () => {
   // Sans attendre : un modèle encore en téléchargement ne doit pas retarder
   // le démarrage, la lecture des polices retombe simplement sur les motifs.
   void checkLlmAvailability();
+  // Purement déclaratif : ne joint pas ePost et n'envoie évidemment rien.
+  checkEpostConfiguration();
   console.log(`Serveur démarré sur le port ${PORT}`);
 });
 

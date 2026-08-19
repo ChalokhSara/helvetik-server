@@ -231,7 +231,17 @@ export async function premiumsByTariff(
  */
 export interface InsurerMailingAddress {
   name: string;
+  /** Adresse prête à imprimer, une entrée par ligne. */
   lines: string[];
+  /**
+   * Mêmes données, décomposées. Les lettres se contentent des lignes ; ePost
+   * veut des champs distincts, et une case postale n'y est pas une rue — la
+   * confondre avec l'une donnait « rue : Postfach, numéro : 2568 ».
+   */
+  street?: string;
+  poBox?: string;
+  plz?: string;
+  city?: string;
 }
 
 export async function insurerAddress(
@@ -246,7 +256,14 @@ export async function insurerAddress(
   const city = [insurer.plz, insurer.city].filter(Boolean).join(' ').trim();
   const lines = [insurer.poBox || insurer.street, city].filter(Boolean) as string[];
 
-  return { name: insurer.legalName || insurer.name, lines };
+  return {
+    name: insurer.legalName || insurer.name,
+    lines,
+    street: insurer.street,
+    poBox: insurer.poBox,
+    plz: insurer.plz,
+    city: insurer.city
+  };
 }
 
 /** Même adresse, recherchée par le nom affiché du catalogue. */

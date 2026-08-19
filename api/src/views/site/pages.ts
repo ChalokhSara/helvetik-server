@@ -859,6 +859,18 @@ export interface ChangeCandidate {
   hasContract: boolean;
   /** La comparaison ne propose rien de mieux que le contrat actuel. */
   alreadyOptimal: boolean;
+  /** Courriers deja confies a ePost, le plus recent d'abord. */
+  dispatches: ChangeDispatch[];
+}
+
+/** Trace d'un courrier confie a ePost, telle qu'on la montre a l'assure. */
+export interface ChangeDispatch {
+  kind: 'CANCELLATION' | 'ENROLMENT';
+  mode: 'PREVIEW' | 'LIVE';
+  sentAt: Date;
+  status?: string;
+  price?: number;
+  error?: string;
 }
 
 /**
@@ -889,6 +901,14 @@ export function renderChange(o: {
    * et il n'est demandé qu'une fois.
    */
   hasFeedback: boolean;
+  /**
+   * Envoi par ePost, quand l'exploitant l'a active.
+   *
+   * Le mode figure dans l'interface et non seulement dans la configuration :
+   * un assure qui clique doit savoir si sa lettre part reellement ou si le
+   * service se contente d'en chiffrer le cout.
+   */
+  epost?: { enabled: boolean; mode: 'PREVIEW' | 'LIVE' };
   savings?: { monthly: number; yearly: number } | null;
   /** Choix de caisse fait sur la comparaison, à reporter sur les lettres. */
   query?: string;
@@ -936,6 +956,63 @@ export function renderChange(o: {
       d'identité, et reprise sur tous vos courriers.</p>
       <div class="actions"><a class="btn" href="/espace/signature">Signer maintenant</a></div>
     </div>`;
+
+  // Envoi par ePost. Deux boutons distincts plutôt qu'un seul : les deux
+  // courriers ne partent pas au même destinataire, et l'assuré peut vouloir
+  // poster la résiliation tout en gardant l'affiliation sous la main.
+  const sending = (candidate: ChangeCandidate) => {
+    if (!o.epost?.enabled) {
+      return '';
+    }
+    const live = o.epost.mode === 'LIVE';
+    const form = (path: string, label: string) =>
+      `          <form method="post" action="/espace/changement/${
+        escapeHtml(candidate.clientUid)}/${path}/envoyer" style="display:inline">
+            <input type="hidden" name="_csrf" value="${escapeHtml(o.csrf)}">
+            <input type="hidden" name="query" value="${escapeHtml(o.query || '')}">
+            <button class="btn btn-ghost" type="submit"${live
+              // L'apostrophe de « l'affiliation » fermerait la chaîne JavaScript
+              // au milieu de l'attribut : la confirmation ne s'afficherait plus,
+              // et le courrier partirait sans que personne n'ait confirmé.
+              ? ` onclick="return confirm('Envoyer réellement ${
+                label.replace(/['\\]/g, '\\$&')} en recommandé ? Une résiliation postée ne se reprend pas.')"`
+              : ''}>${live ? 'Poster' : 'Estimer l\'envoi'} — ${label}</button>
+          </form>`;
+
+    return `        <p class="muted" style="margin:.6rem 0 .2rem">${live
+      ? '<strong>Envoi réel.</strong> Le courrier part en recommandé, à vos frais.'
+      : '<strong>Mode aperçu.</strong> Rien ne part : ePost annonce seulement le prix et les canaux disponibles.'}</p>
+        <div class="actions">
+${form('resiliation', 'la résiliation')}
+${form('affiliation', 'l\'affiliation')}
+        </div>
+`;
+  };
+
+  // Ce qui est déjà parti. Sans cette trace, un assuré qui doute renverrait la
+  // même résiliation, et une caisse recevant deux courriers contradictoires
+  // s'en tient au premier.
+  const history = (candidate: ChangeCandidate) => {
+    if (!candidate.dispatches.length) {
+      return '';
+    }
+    const line = (d: ChangeDispatch) => {
+      const what = d.kind === 'CANCELLATION' ? 'Résiliation' : 'Affiliation';
+      const when = formatDate(d.sentAt);
+      if (d.error) {
+        return `<li>${what} · ${when} · <span class="err">échec : ${escapeHtml(d.error)}</span></li>`;
+      }
+      const cost = d.price !== undefined ? ` · ${money(d.price)}` : '';
+      return d.mode === 'LIVE'
+        ? `<li>${what} · <strong>postée le ${when}</strong>${cost}${
+          d.status ? ` · ${escapeHtml(d.status)}` : ''}</li>`
+        : `<li>${what} · aperçu du ${when}${cost} · <span class="muted">rien n'a été envoyé</span></li>`;
+    };
+    return `        <ul class="muted" style="margin:.4rem 0 0;padding-left:1.1rem">
+${candidate.dispatches.map(line).map((l) => '          ' + l).join('\n')}
+        </ul>
+`;
+  };
 
   const row = (candidate: ChangeCandidate) => {
     // Déjà au meilleur tarif : proposer de résilier pour se réaffilier à la
@@ -989,7 +1066,8 @@ export function renderChange(o: {
             Lettre de résiliation</a>
           <a class="btn" href="/espace/changement/${escapeHtml(candidate.clientUid)}/affiliation${suffix}">
             Lettre d'affiliation</a>
-        </div>`;
+        </div>
+${sending(candidate)}${history(candidate)}`;
 
     return `      <div class="card">
         <h2>${escapeHtml(candidate.name)}</h2>
@@ -1042,9 +1120,9 @@ ${o.candidates.length
       <ul class="muted" style="margin:.4rem 0 0;padding-left:1.1rem">
         <li>Nous produisons les lettres, avec vos coordonnées, votre numéro de police,
         la franchise et le modèle retenus, et votre signature.</li>
-        <li><strong>Vous les envoyez vous-même</strong>, en recommandé, avec une copie
-        de votre pièce d'identité. Nous n'expédions rien à votre place : un courrier
-        perdu ne se découvrirait qu'en janvier.</li>
+        <li>${o.epost?.enabled && o.epost.mode === 'LIVE'
+          ? '<strong>Nous pouvons les poster pour vous</strong>, en recommandé, depuis cette page — ou vous les envoyez vous-même. Dans les deux cas, joignez une copie de votre pièce d\'identité et gardez le récépissé.'
+          : '<strong>Vous les envoyez vous-même</strong>, en recommandé, avec une copie de votre pièce d\'identité. Nous n\'expédions rien à votre place : un courrier perdu ne se découvrirait qu\'en janvier.'}</li>
         <li>Votre couverture n'est jamais interrompue : la nouvelle caisse atteste
         auprès de l'ancienne avant que la résiliation ne prenne effet.</li>
       </ul>

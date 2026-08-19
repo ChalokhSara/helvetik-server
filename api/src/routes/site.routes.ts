@@ -40,6 +40,7 @@ import {
   cancellationDeadlineFor,
   LetterKind,
   letterFilename,
+  letterTitle,
   renderLetter
 } from '../services/letter.service';
 import { readInsurancePayload } from '../utils/insurance-payload';
@@ -57,11 +58,17 @@ import { modelLabel, optimiseLamal } from '../services/lamal-optimisation.servic
 import {
   Catalogue,
   catalogueFor,
+  InsurerMailingAddress,
   insurerAddressByName,
   premiumFor
 } from '../services/premium-catalogue.service';
 import { activeYear } from '../services/premium-import.service';
 import { readPolicy } from '../services/policy-llm.service';
+import {
+  dispatchLetter,
+  epostConfig
+} from '../services/epost.service';
+import { LetterDispatch } from '../models/letter-dispatch.model';
 import * as views from '../views/site/pages';
 import { StoredSide, Values } from '../views/site/forms';
 
@@ -1845,6 +1852,25 @@ router.get('/espace/changement', async (req: Request, res: Response) => {
     const hasSignature = holder ? await hasDocument(holder.uid, 'SIGNATURE') : false;
     const hasFeedback = await hasAnsweredSurvey(user.uid);
 
+    // Courriers déjà confiés à ePost. Bornés aux quatre derniers par assuré :
+    // la page dit ce qui est parti, elle n'est pas un journal d'exploitation.
+    const dispatches = new Map<string, views.ChangeDispatch[]>();
+    for (const record of await LetterDispatch.find({ userUid: user.uid })
+      .sort({ sentAt: -1 }).limit(40)) {
+      const list = dispatches.get(record.clientUid) || [];
+      if (list.length < 4) {
+        list.push({
+          kind: record.kind,
+          mode: record.mode,
+          sentAt: record.sentAt,
+          status: record.status,
+          price: record.price,
+          error: record.error
+        });
+      }
+      dispatches.set(record.clientUid, list);
+    }
+
     // La comparaison n'est pas indispensable pour résilier : on la tente, et
     // son absence n'empêche pas de produire les lettres.
     let result: Awaited<ReturnType<typeof optimiseLamal>> = null;
@@ -1895,7 +1921,8 @@ router.get('/espace/changement', async (req: Request, res: Response) => {
           .map((d) => d.kind)
           .filter((kind) => kind !== 'SIGNATURE'),
         hasContract: Boolean(contract),
-        alreadyOptimal: sameTariff
+        alreadyOptimal: sameTariff,
+        dispatches: dispatches.get(client.uid) || []
       };
     });
 
@@ -1907,6 +1934,7 @@ router.get('/espace/changement', async (req: Request, res: Response) => {
       candidates,
       hasSignature,
       hasFeedback,
+      epost: { enabled: epostConfig().enabled, mode: epostConfig().mode },
       // Le choix de caisse voyage tel quel jusqu'aux lettres.
       query: new URLSearchParams({
         ...(Number.isFinite(pickedInsurer) ? { caisse: String(pickedInsurer) } : {}),
@@ -1916,7 +1944,19 @@ router.get('/espace/changement', async (req: Request, res: Response) => {
       savings: result
         ? (individual && result.individual ? result.individual.savings : result.potentialSavings)
         : null,
-      notice: String(req.query.msg || '') === 'signee' ? 'Signature enregistrée.' : undefined
+      notice: {
+        signee: 'Signature enregistrée.',
+        apercu: 'Aperçu ePost obtenu : le prix et les canaux figurent ci-dessous. '
+          + 'Aucun courrier n\'a été envoyé.',
+        poste: 'Courrier confié à ePost. Il part en recommandé ; son état apparaît ci-dessous.'
+      }[String(req.query.msg || '')],
+      error: {
+        epost: 'ePost n\'a pas pu prendre le courrier en charge. Rien n\'est parti : '
+          + 'téléchargez la lettre et postez-la vous-même.',
+        'epost-desactive': 'L\'envoi par ePost n\'est pas activé sur ce service.',
+        'epost-adresse': 'Nous n\'avons pas l\'adresse postale de cette caisse. '
+          + 'Téléchargez la lettre et complétez le destinataire vous-même.'
+      }[String(req.query.err || '')]
     }));
   } catch (err) {
     console.error('Erreur du dossier de changement:', err);
@@ -1924,24 +1964,35 @@ router.get('/espace/changement', async (req: Request, res: Response) => {
   }
 });
 
+type PreparedLetter =
+  | { redirect: string }
+  | {
+      input: Parameters<typeof renderLetter>[0];
+      recipientName: string;
+      /** Adresse decomposee, quand la caisse figure au catalogue de l'OFSP. */
+      address: InsurerMailingAddress | null;
+    };
+
 /**
- * Produit une lettre en PDF.
+ * Rassemble tout ce qu'une lettre exige : l'assure, son contrat, la caisse
+ * destinataire avec son adresse officielle, et la signature du titulaire.
  *
- * Rien n'est conservé : le document porte le nom, l'adresse et le numéro
- * d'assuré, et il se reconstruit à l'identique au téléchargement suivant.
+ * Commun au telechargement et a l'envoi par ePost : les deux doivent produire
+ * exactement le meme document, sans quoi l'assure posterait une lettre et en
+ * garderait une autre.
  */
-async function serveLetter(req: Request, res: Response, kind: LetterKind) {
+async function prepareLetter(req: Request, kind: LetterKind): Promise<PreparedLetter> {
   const user = req.siteUser!;
   const client = await Client.findOne({ uid: req.params.uid, userUid: user.uid });
   if (!client) {
-    return res.status(404).redirect('/espace/changement');
+    return { redirect: '/espace/changement' };
   }
 
   // Le questionnaire conditionne l'accès : la garde est ici et pas seulement
   // dans la page, sinon l'adresse de la lettre suffirait à la contourner.
   if (!await hasAnsweredSurvey(user.uid)) {
     const query = new URLSearchParams(req.query as Record<string, string>).toString();
-    return res.redirect(`/espace/souscription${query ? `?${query}` : ''}`);
+    return { redirect: `/espace/souscription${query ? `?${query}` : ''}` };
   }
 
   const year = targetYear();
@@ -1960,7 +2011,7 @@ async function serveLetter(req: Request, res: Response, kind: LetterKind) {
   }
 
   if (!signature) {
-    return res.redirect('/espace/signature');
+    return { redirect: '/espace/signature' };
   }
 
   // Destinataire : la caisse quittée pour la résiliation, la caisse retenue
@@ -2003,8 +2054,8 @@ async function serveLetter(req: Request, res: Response, kind: LetterKind) {
     ? await insurerAddressByName(catalogueYear, recipient)
     : null;
 
-  try {
-    const input = {
+  return {
+    input: {
       kind,
       client,
       recipient: address || { name: recipient || 'Votre caisse maladie', lines: [] },
@@ -2015,12 +2066,36 @@ async function serveLetter(req: Request, res: Response, kind: LetterKind) {
       tariffLabel,
       employerAccidentCoverage: contract?.employerAccidentCoverage,
       signature
-    };
+    },
+    recipientName: address?.name || recipient || 'Votre caisse maladie',
+    address
+  };
+}
 
-    const pdf = await renderLetter(input);
+/**
+ * Produit une lettre en PDF.
+ *
+ * Rien n'est conservé : le document porte le nom, l'adresse et le numéro
+ * d'assuré, et il se reconstruit à l'identique au téléchargement suivant.
+ */
+async function serveLetter(req: Request, res: Response, kind: LetterKind) {
+  let prepared: PreparedLetter;
+  try {
+    prepared = await prepareLetter(req, kind);
+  } catch (err) {
+    console.error('Erreur de préparation de lettre:', err);
+    return res.status(500).type('text/plain').send('La lettre n\'a pas pu être produite.');
+  }
+
+  if ('redirect' in prepared) {
+    return res.redirect(prepared.redirect);
+  }
+
+  try {
+    const pdf = await renderLetter(prepared.input);
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="${letterFilename(input)}"`,
+      'Content-Disposition': `attachment; filename="${letterFilename(prepared.input)}"`,
       'Cache-Control': 'no-store, private'
     }).send(pdf);
   } catch (err) {
@@ -2033,6 +2108,112 @@ router.get('/espace/changement/:uid/resiliation', (req, res) =>
   serveLetter(req, res, 'CANCELLATION'));
 router.get('/espace/changement/:uid/affiliation', (req, res) =>
   serveLetter(req, res, 'ENROLMENT'));
+
+/**
+ * Confie une lettre à ePost.
+ *
+ * En POST et sous jeton CSRF : c'est une action qui engage — en mode réel elle
+ * poste un recommandé facturé, et une résiliation partie ne se reprend pas.
+ *
+ * Le mode aperçu emprunte exactement le même chemin — jeton, multipart,
+ * adresses — mais ePost n'envoie rien et se contente d'annoncer les canaux et
+ * le prix. C'est le mode par défaut, et le seul à utiliser tant que le compte
+ * n'est pas celui de production.
+ */
+async function sendLetter(req: Request, res: Response, kind: LetterKind) {
+  const user = req.siteUser!;
+  const config = epostConfig();
+
+  // Le choix de caisse voyage dans le formulaire : sans lui, le retour sur la
+  // page du changement perdrait la comparaison et proposerait autre chose.
+  const forward = new URLSearchParams(String(req.body?.query || ''));
+  const backTo = (flag: string) => {
+    const query = new URLSearchParams(forward);
+    const [key, value] = flag.split('=');
+    query.set(key, value);
+    return `/espace/changement?${query.toString()}`;
+  };
+
+  if (!config.enabled) {
+    return res.redirect(backTo('err=epost-desactive'));
+  }
+
+  let prepared: PreparedLetter;
+  try {
+    prepared = await prepareLetter(req, kind);
+  } catch (err) {
+    console.error('Erreur de préparation de lettre:', err);
+    return res.redirect(backTo('err=epost'));
+  }
+
+  if ('redirect' in prepared) {
+    return res.redirect(prepared.redirect);
+  }
+
+  const { input, recipientName, address } = prepared;
+  // Sans adresse postale, ePost n'a rien à distribuer : mieux vaut le dire que
+  // de laisser partir un envoi qui reviendra faute de destinataire.
+  if (!address || !address.lines.length) {
+    return res.redirect(backTo('err=epost-adresse'));
+  }
+
+  const reference = `HLV-${kind === 'CANCELLATION' ? 'RES' : 'AFF'}-${
+    input.client.uid.slice(0, 8)}-${input.effectiveYear}`;
+
+  try {
+    const pdf = await renderLetter(input);
+    const result = await dispatchLetter({
+      pdf,
+      filename: letterFilename(input),
+      sender: input.client,
+      recipient: address,
+      title: letterTitle(kind, input.effectiveYear),
+      reference
+    }, config);
+
+    await LetterDispatch.create({
+      userUid: user.uid,
+      clientUid: input.client.uid,
+      kind,
+      effectiveYear: input.effectiveYear,
+      mode: result.mode,
+      recipientName,
+      deliveryId: result.deliveryId,
+      reference,
+      status: result.status,
+      price: result.price,
+      channels: result.channels,
+      error: result.error
+    });
+
+    return res.redirect(backTo(result.error
+      ? 'err=epost'
+      : `msg=${result.mode === 'LIVE' ? 'poste' : 'apercu'}`));
+  } catch (err) {
+    console.error('Erreur d\'envoi ePost:', err);
+    // L'échec est journalisé lui aussi : une lettre que l'assuré croit partie
+    // et qui ne l'est pas est la panne la plus coûteuse du service.
+    await LetterDispatch.create({
+      userUid: user.uid,
+      clientUid: input.client.uid,
+      kind,
+      effectiveYear: input.effectiveYear,
+      mode: config.mode,
+      recipientName,
+      reference,
+      channels: [],
+      error: err instanceof Error ? err.message : String(err)
+    }).catch(() => undefined);
+    return res.redirect(backTo('err=epost'));
+  }
+}
+
+// Le corps urlencodé et le jeton CSRF sont déjà exigés par le routeur : ces
+// deux routes n'ont rien de particulier à ajouter.
+router.post('/espace/changement/:uid/resiliation/envoyer', (req, res) =>
+  sendLetter(req, res, 'CANCELLATION'));
+router.post('/espace/changement/:uid/affiliation/envoyer', (req, res) =>
+  sendLetter(req, res, 'ENROLMENT'));
 
 
 router.get('/espace/souscription', async (req: Request, res: Response) => {

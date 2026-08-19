@@ -7,7 +7,8 @@
     "start": "node dist/app.js",
     "dev": "nodemon src/app.ts",
     "build": "tsc",
-    "test": "jest"
+    "test": "jest",
+    "epost:check": "node scripts/epost-check.js"
   },
   "dependencies": {
     "@types/pdfkit": "^0.17.6",
