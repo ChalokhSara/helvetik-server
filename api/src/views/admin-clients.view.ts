@@ -4,10 +4,10 @@
 
 import { CANTONS, IClient } from '../models/client.model';
 import {
-  DOCUMENT_SIDES,
-  DocumentSide,
+  DocumentKind,
+  IDENTITY_KINDS,
   IIdentityDocument,
-  SIDE_LABELS
+  KIND_LABELS
 } from '../models/identity-document.model';
 import {
   alertBlock,
@@ -40,7 +40,7 @@ export interface ClientListOptions {
   /** Email du titulaire, par uid — les clients ne portent qu'un userUid. */
   userEmails: Map<string, string>;
   /** Faces de pièce d'identité déposées, par uid de client. */
-  documents: Map<string, DocumentSide[]>;
+  documents: Map<string, DocumentKind[]>;
   search: string;
   userUid: string;
   csrf: string;
@@ -53,12 +53,12 @@ export interface ClientListOptions {
  * État du dossier d'identité : c'est lui qui décide si une lettre de
  * résiliation peut partir, la caisse exigeant une copie des deux faces.
  */
-function documentBadge(sides: DocumentSide[] = []): string {
+function documentBadge(sides: DocumentKind[] = []): string {
   if (sides.length >= 2) {
     return '<span class="badge ok">Recto + verso</span>';
   }
   if (sides.length === 1) {
-    return `<span class="badge">${escapeHtml(SIDE_LABELS[sides[0]])} seul</span>`;
+    return `<span class="badge">${escapeHtml(KIND_LABELS[sides[0]])} seul</span>`;
   }
   return '<span class="badge blocked">Aucune</span>';
 }
@@ -110,7 +110,7 @@ ${body}`);
 function renderClientRow(
   client: IClient,
   userEmails: Map<string, string>,
-  sides: DocumentSide[],
+  sides: DocumentKind[],
   csrf: string
 ): string {
   const uid = escapeHtml(client.uid);
@@ -300,11 +300,11 @@ export function renderClientDocumentsPage(options: {
 }): string {
   const client = options.client;
   const fullName = [client.firstname, client.name].filter(Boolean).join(' ') || client.email;
-  const byside = new Map(options.documents.map((d) => [d.side, d]));
+  const byside = new Map(options.documents.map((d) => [d.kind, d]));
 
-  const row = (side: DocumentSide) => {
+  const row = (side: DocumentKind) => {
     const document = byside.get(side);
-    const label = SIDE_LABELS[side];
+    const label = KIND_LABELS[side];
 
     if (!document) {
       return `        <tr>
@@ -351,7 +351,7 @@ ${alertBlock(
         </tr>
       </thead>
       <tbody>
-${DOCUMENT_SIDES.map(row).join('\n')}
+${IDENTITY_KINDS.map(row).join('\n')}
       </tbody>
     </table>
     <p class="muted">Chaque téléchargement est journalisé. Les fichiers sont conservés

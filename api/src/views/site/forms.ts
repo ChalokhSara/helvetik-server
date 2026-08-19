@@ -321,6 +321,146 @@ ${cameraScript('cam', 'document', 'import-form')}
     </details>`;
 }
 
+/**
+ * Recueil de la signature manuscrite.
+ *
+ * Deux voies, parce qu'aucune ne convient à tout le monde : signer au doigt
+ * sur un téléphone, ou déposer la photo d'une signature tracée sur papier —
+ * ce que préfèrent ceux qui signent à la souris, où le résultat ne ressemble
+ * à rien.
+ *
+ * Le tracé est converti en PNG à fond transparent et envoyé dans le même champ
+ * fichier que la photo : le serveur n'a donc qu'un seul chemin à traiter, et
+ * la signature est conservée dans le même coffre chiffré que la pièce
+ * d'identité.
+ *
+ * Elle n'est demandée qu'une fois : les lettres suivantes la réutilisent.
+ */
+export function signaturePad(options: { action: string; csrf: string }): string {
+  return `    <form method="post" action="${options.action}" enctype="multipart/form-data"
+          id="sig-form" class="card">
+      <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
+
+      <h2>Signer</h2>
+      <p class="muted">Tracez votre signature dans le cadre, au doigt sur un téléphone
+      ou à la souris. Elle sera reproduite sur vos lettres.</p>
+
+      <div class="sigpad" id="sigpad">
+        <canvas id="sig-canvas" width="900" height="300"></canvas>
+        <p class="sig-hint" id="sig-hint">Signez ici</p>
+      </div>
+      <div class="actions" style="margin-bottom:1rem">
+        <button type="button" class="btn-ghost" id="sig-clear">Effacer</button>
+      </div>
+
+      <details>
+        <summary style="cursor:pointer">Ou déposer une photo de ma signature</summary>
+        <p class="muted">Signez sur une feuille blanche, photographiez-la bien à plat.
+        Le fond blanc est retiré automatiquement.</p>
+        <input id="sig-file" name="signature" type="file" accept="image/*" capture="environment">
+      </details>
+
+      <div class="actions">
+        <button type="submit" id="sig-submit">Enregistrer ma signature</button>
+      </div>
+    </form>
+
+    <script>
+      (function () {
+        var canvas = document.getElementById('sig-canvas');
+        var form = document.getElementById('sig-form');
+        var file = document.getElementById('sig-file');
+        var hint = document.getElementById('sig-hint');
+        if (!canvas || !form || !file || !canvas.getContext) { return; }
+
+        var ctx = canvas.getContext('2d');
+        var drawing = false;
+        var drawn = false;
+        var last = null;
+
+        ctx.lineWidth = 3.5;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = '#111827';
+
+        // Le canevas a une taille fixe en pixels et une taille variable à
+        // l'écran : sans ce rapport, le trait serait décalé du curseur.
+        function at(event) {
+          var box = canvas.getBoundingClientRect();
+          var source = event.touches && event.touches[0] ? event.touches[0] : event;
+          return {
+            x: (source.clientX - box.left) * (canvas.width / box.width),
+            y: (source.clientY - box.top) * (canvas.height / box.height)
+          };
+        }
+
+        function start(event) {
+          event.preventDefault();
+          drawing = true;
+          last = at(event);
+          if (hint) { hint.hidden = true; }
+        }
+
+        function move(event) {
+          if (!drawing) { return; }
+          event.preventDefault();
+          var point = at(event);
+          ctx.beginPath();
+          ctx.moveTo(last.x, last.y);
+          ctx.lineTo(point.x, point.y);
+          ctx.stroke();
+          last = point;
+          drawn = true;
+        }
+
+        function stop() { drawing = false; last = null; }
+
+        ['mousedown', 'touchstart'].forEach(function (t) { canvas.addEventListener(t, start); });
+        ['mousemove', 'touchmove'].forEach(function (t) { canvas.addEventListener(t, move); });
+        ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach(function (t) {
+          canvas.addEventListener(t, stop);
+        });
+
+        document.getElementById('sig-clear').addEventListener('click', function () {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          drawn = false;
+          if (hint) { hint.hidden = false; }
+        });
+
+        // Une photo déposée l'emporte sur le tracé : c'est le geste le plus
+        // récent et le plus explicite.
+        file.addEventListener('change', function () {
+          if (file.files && file.files.length) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawn = false;
+            if (hint) { hint.hidden = false; }
+          }
+        });
+
+        form.addEventListener('submit', function (event) {
+          if (file.files && file.files.length) { return; }
+          if (!drawn) {
+            event.preventDefault();
+            window.alert('Tracez votre signature, ou déposez-en une photo.');
+            return;
+          }
+          if (typeof DataTransfer === 'undefined' || !canvas.toBlob) { return; }
+
+          // L'envoi attend la conversion : elle est asynchrone, on relance
+          // donc la soumission une fois le fichier en place.
+          event.preventDefault();
+          canvas.toBlob(function (blob) {
+            if (!blob) { form.submit(); return; }
+            var data = new DataTransfer();
+            data.items.add(new File([blob], 'signature.png', { type: 'image/png' }));
+            file.files = data.files;
+            form.submit();
+          }, 'image/png');
+        });
+      })();
+    </script>`;
+}
+
 /** Pièce déjà déposée, telle qu'affichée à l'assuré. */
 export interface StoredSide {
   side: 'RECTO' | 'VERSO';

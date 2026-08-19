@@ -80,6 +80,29 @@ function cellText(value: unknown): string {
   return String(value).replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Même lecture, mais les retours à la ligne sont conservés.
+ *
+ * `cellText` aplatit tous les blancs, ce qui convient partout ailleurs. Pas
+ * ici : l'adresse d'une caisse tient dans une seule cellule où le passage à la
+ * ligne sépare la rue, la case postale, le NPA et les coordonnées. Sans lui,
+ * il ne reste qu'une chaîne indistincte.
+ */
+function cellLines(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (typeof value === 'object' && value !== null && 'richText' in value) {
+    return (value as { richText: { text: string }[] }).richText.map((r) => r.text).join('');
+  }
+  return String(value)
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .join('\n')
+    .trim();
+}
+
 function cellNumber(value: unknown): number | null {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? value : null;
@@ -375,14 +398,104 @@ async function importRegions(path: string, options: ImportOptions): Promise<Impo
   };
 }
 
-/** Importe la liste des assureurs admis (feuille « Indice »). */
+/**
+ * Adresse postale d'une caisse, telle que la feuille « Assureurs admis »
+ * l'écrit dans une seule cellule.
+ *
+ * Le format est régulier d'un assureur à l'autre :
+ *
+ *     Tribschenstrasse 21     ← rue
+ *     Postfach 2568           ← case postale, quand il y en a une
+ *     6002 Luzern             ← NPA et localité, dernière ligne d'adresse
+ *     Tel. 058 277 11 11      ← à partir d'ici, coordonnées de contact
+ *     Fax 058 277 12 12
+ *     css.info@css.ch
+ *     www.css.ch
+ *
+ * La ligne « NPA localité » sert de charnière : tout ce qui précède est
+ * l'adresse, tout ce qui suit est du contact.
+ */
+interface InsurerAddress {
+  street?: string;
+  poBox?: string;
+  plz?: string;
+  city?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
+}
+
+function parseInsurerAddress(raw: string): InsurerAddress {
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const address: InsurerAddress = {};
+
+  const pivot = lines.findIndex((line) => /^\d{4}\s+\S/.test(line));
+  const before = pivot === -1 ? lines : lines.slice(0, pivot);
+  const after = pivot === -1 ? [] : lines.slice(pivot + 1);
+
+  if (pivot !== -1) {
+    const match = lines[pivot].match(/^(\d{4})\s+(.+)$/);
+    if (match) {
+      address.plz = match[1];
+      address.city = match[2].trim();
+    }
+  }
+
+  for (const line of before) {
+    if (/^(postfach|case postale|casella postale)\b/i.test(line)) {
+      address.poBox = line;
+    } else if (!address.street) {
+      address.street = line;
+    }
+  }
+
+  for (const line of after) {
+    if (/^(tel|tél|telefon|téléphone)\b/i.test(line) && !address.phone) {
+      address.phone = line.replace(/^(tel|tél|telefon|téléphone)\.?\s*/i, '').trim();
+    } else if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(line) && !address.email) {
+      address.email = line;
+    } else if (/^www\./i.test(line) && !address.website) {
+      address.website = line;
+    }
+  }
+
+  return address;
+}
+
+/**
+ * Importe la liste des assureurs admis.
+ *
+ * Deux feuilles du même fichier, complémentaires : « Indice » donne le nom
+ * court utilisé partout dans les tableaux de primes, « Assureurs admis »
+ * donne la raison sociale et l'adresse du siège. Les courriers ont besoin des
+ * deux — on n'adresse pas un recommandé à « CSS ».
+ */
 async function importInsurers(path: string, options: ImportOptions): Promise<ImportResult> {
   const workbook = openWorkbook(path);
-  const rows: Record<string, unknown>[] = [];
+  const shortNames = new Map<number, { name: string; locality?: string }>();
+  const details = new Map<number, { legalName: string } & InsurerAddress>();
   let year: number | null = null;
-  let imported = 0;
 
   for await (const sheet of workbook) {
+    const isRegistry = /admis/i.test(sheetName(sheet));
+
+    // La feuille détaillée étale certains assureurs sur plusieurs lignes :
+    // celles sans numéro prolongent la précédente. On accumule donc jusqu'au
+    // prochain identifiant.
+    let currentId: number | null = null;
+    let currentName = '';
+    let currentAddress = '';
+
+    const commit = () => {
+      if (currentId === null || details.has(currentId)) {
+        return;
+      }
+      const legalName = currentName.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ').trim();
+      if (legalName) {
+        details.set(currentId, { legalName, ...parseInsurerAddress(currentAddress) });
+      }
+    };
+
     for await (const row of sheet) {
       const v = row.values as unknown[];
 
@@ -394,44 +507,75 @@ async function importInsurers(path: string, options: ImportOptions): Promise<Imp
         }
       }
 
+      if (isRegistry) {
+        // Le numéro est parfois suivi d'un marqueur (« 1520 x »), qui signale
+        // un rayon d'activité restreint. Ne retenir que les chiffres de tête :
+        // sinon la ligne passe pour la suite de la précédente, et l'assureur
+        // se retrouve fondu dans son voisin — Hotela dans Sanitas.
+        const id = (String(v[1] ?? '').trim().match(/^(\d+)\b/) || [])[1] || '';
+        if (id) {
+          commit();
+          currentId = Number(id);
+          currentName = cellLines(v[3]);
+          currentAddress = cellLines(v[4]);
+        } else if (currentId !== null) {
+          currentName += `\n${cellLines(v[3])}`;
+          currentAddress += `\n${cellLines(v[4])}`;
+        }
+        continue;
+      }
+
+      // Feuille « Indice » : numéro en colonne 2, nom en 4, localité en 5.
       const insurerId = cellNumber(v[2]);
       const name = cellText(v[4]);
-      const locality = cellText(v[5]);
-
       if (insurerId === null || !name || !/^\d+$/.test(String(v[2] ?? '').trim())) {
         continue;
       }
-      rows.push({ year, insurerId, name, locality: locality || undefined });
-      imported++;
+      if (!shortNames.has(insurerId)) {
+        shortNames.set(insurerId, { name, locality: cellText(v[5]) || undefined });
+      }
     }
+
+    commit();
   }
 
   if (year === null) {
     throw new Error('Année introuvable dans le fichier des assureurs admis.');
   }
-  if (!imported) {
+  if (!shortNames.size && !details.size) {
     throw new Error('Aucun assureur trouvé dans ce fichier.');
   }
 
-  await PremiumInsurer.deleteMany({ year });
-  // Le même identifiant apparaît sur plusieurs feuilles : on ne garde que le premier.
-  const unique = new Map<number, unknown>();
-  for (const row of rows) {
-    const id = (row as { insurerId: number }).insurerId;
-    if (!unique.has(id)) {
-      unique.set(id, row);
-    }
-  }
-  await PremiumInsurer.insertMany([...unique.values()], { ordered: false });
+  // Un assureur peut ne figurer que dans l'une des deux feuilles : on les
+  // réunit sur l'identifiant, seule clé commune et stable.
+  const ids = new Set([...shortNames.keys(), ...details.keys()]);
+  const rows = [...ids].map((insurerId) => {
+    const short = shortNames.get(insurerId);
+    const detail = details.get(insurerId);
+    return {
+      year,
+      insurerId,
+      // Sans nom court, la raison sociale fait l'affaire pour l'affichage.
+      name: short?.name || detail?.legalName || String(insurerId),
+      locality: short?.locality,
+      ...detail
+    };
+  });
 
-  await registerSource(year, { kind: 'INSURERS', rows: unique.size, path, options });
+  const withAddress = rows.filter((row) => row.plz).length;
+
+  await PremiumInsurer.deleteMany({ year });
+  await PremiumInsurer.insertMany(rows, { ordered: false });
+
+  await registerSource(year, { kind: 'INSURERS', rows: rows.length, path, options });
 
   return {
     kind: 'INSURERS',
     year,
-    rows: unique.size,
+    rows: rows.length,
     status: 'OK',
-    message: `${unique.size} assureur(s) importé(s) pour ${year}.`
+    message: `${rows.length} assureur(s) importé(s) pour ${year}, ` +
+      `dont ${withAddress} avec adresse postale.`
   };
 }
 

@@ -7,11 +7,7 @@ import {
   listDocuments,
   retrieveDocument
 } from '../services/document-vault.service';
-import {
-  DOCUMENT_SIDES,
-  DocumentSide,
-  SIDE_LABELS
-} from '../models/identity-document.model';
+import { DOCUMENT_KINDS, DocumentKind } from '../models/identity-document.model';
 import { isFirstClientOfHousehold, PHONE_REQUIRED_MESSAGE } from '../services/household.service';
 import { buildBaseUrl, escapeRegex, PAGE_SIZE, parsePage } from '../utils/query';
 import {
@@ -133,7 +129,7 @@ router.get('/', async (req: Request, res: Response) => {
     // aucune lettre de résiliation ne peut être envoyée.
     const byClient = await documentsByClient(clients.map((c) => c.uid));
     const documents = new Map(
-      [...byClient].map(([uid, docs]) => [uid, docs.map((d) => d.side)])
+      [...byClient].map(([uid, docs]) => [uid, docs.map((d) => d.kind)])
     );
 
     res.type('html').send(renderClientListPage({
@@ -355,8 +351,8 @@ router.get('/:uid/piece', async (req: Request, res: Response) => {
 });
 
 router.get('/:uid/piece/:side', async (req: Request, res: Response) => {
-  const side = String(req.params.side || '').toUpperCase() as DocumentSide;
-  if (!DOCUMENT_SIDES.includes(side)) {
+  const side = String(req.params.side || '').toUpperCase() as DocumentKind;
+  if (!DOCUMENT_KINDS.includes(side)) {
     return res.status(404).type('text/plain').send('Face inconnue.');
   }
 

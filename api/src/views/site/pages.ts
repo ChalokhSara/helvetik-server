@@ -33,6 +33,7 @@ import {
   insuredFields,
   radios,
   select,
+  signaturePad,
   text,
   textarea,
   validationScript
@@ -588,7 +589,24 @@ function deltaBlock(savings: number, hasCurrent: boolean): string {
 }
 
 /** Liste des meilleures offres pour le foyer entier, toutes chez la même caisse. */
-function groupedList(result: OptimisationResult, limit: number): string {
+/**
+ * Lien de choix d'une offre.
+ *
+ * La comparaison ne sert pas qu'à désigner la moins chère : on change aussi de
+ * caisse pour son service, son réseau de médecins, ou simplement parce qu'on
+ * la connaît. Chaque offre est donc sélectionnable, et le choix voyage jusqu'aux
+ * lettres — c'est lui qui fixe le destinataire de l'affiliation.
+ */
+function pickHref(offer: { insurerId: number; tariffCode: string }, strategy: string): string {
+  const params = new URLSearchParams({
+    caisse: String(offer.insurerId),
+    modele: offer.tariffCode,
+    option: strategy === 'INDIVIDUAL' ? 'individuel' : 'groupe'
+  });
+  return `/espace/changement?${params.toString()}`;
+}
+
+function groupedList(result: OptimisationResult, limit: number, strategy: string): string {
   return result.offers.slice(0, limit).map((offer) => {
     const isCurrent = result.current?.insurerId === offer.insurerId &&
       result.current?.tariffCode === offer.tariffCode;
@@ -599,6 +617,9 @@ function groupedList(result: OptimisationResult, limit: number): string {
             ${deltaBlock(offer.monthly.savings, Boolean(result.current))}
             <span class="price">${money(offer.monthly.total)} <small>/mois</small></span>
           </div>
+          ${isCurrent
+            ? '<span class="muted">Votre contrat actuel</span>'
+            : `<a class="pick" href="${pickHref(offer, strategy)}">Choisir cette caisse</a>`}
         </li>`;
   }).join('\n');
 }
@@ -711,25 +732,39 @@ ${stat('Chacun sa caisse', individual.savings.yearly, 'soit par an', split)}
   const strategy = individual && individual.extra.monthly > 0 ? 'INDIVIDUAL' : 'GROUPED';
   const subscribe = bestSavings.monthly > 0
     ? `    <div class="card cta">
-      <h2>Passer à l'action</h2>
-      <p>Vous pouvez engager le changement pour l'année prochaine. La résiliation de
-      l'assurance de base doit parvenir à votre caisse actuelle <strong>avant fin
-      novembre</strong> ; nous nous chargeons des courriers et du suivi
-      ${individual && individual.insurerCount > 1
-        ? 'auprès de chaque caisse concernée'
-        : 'auprès de votre nouvelle caisse'}.</p>
+      <h2>Comment ça se passe ensuite</h2>
+      <p>Choisissez une caisse ci-dessus : nous préparons vos deux courriers, remplis
+      et signés — la résiliation de votre caisse actuelle et la demande d'affiliation
+      à la nouvelle. Ils doivent parvenir à votre caisse <strong>avant fin
+      novembre</strong>, et c'est vous qui les envoyez en recommandé.</p>
       <div class="actions">
-        <a class="btn" href="/espace/souscription?option=${strategy === 'INDIVIDUAL' ? 'individuel' : 'groupe'}">
-          Souscrire à ces nouvelles assurances</a>
+        <a class="link" href="/espace/souscription?option=${strategy === 'INDIVIDUAL' ? 'individuel' : 'groupe'}">
+          Donner mon avis sur le service</a>
       </div>
-      <p class="muted">Service en phase de test : la page suivante vous explique
-      précisément où nous en sommes avant tout engagement.</p>
     </div>
 `
     : '';
 
-  const grouped = `      <ul class="offers">
-${groupedList(result, o.limit)}
+  /**
+   * Raccourci vers la meilleure offre, posé **au-dessus** de la liste.
+   *
+   * C'est le geste que l'on veut rendre le plus court : la majorité des
+   * assurés veut simplement payer moins, et n'a aucune raison de parcourir
+   * quinze lignes pour retrouver celle qui est déjà en tête.
+   */
+  const cheapest = result.offers[0];
+  const quickPick = cheapest && bestSavings.monthly > 0
+    ? `      <div class="quick-pick">
+        <span class="sum"><strong>${escapeHtml(cheapest.insurer)}</strong> —
+        ${escapeHtml(modelLabel(cheapest))}, ${money(cheapest.monthly.total)} par mois.
+        ${result.current ? `Vous économisez ${money(bestSavings.monthly)} par mois.` : ''}</span>
+        <a class="btn" href="${pickHref(cheapest, strategy)}">Prendre la moins chère</a>
+      </div>`
+    : '';
+
+  const grouped = `${quickPick}
+      <ul class="offers">
+${groupedList(result, o.limit, strategy)}
       </ul>`;
 
   // Onglets en CSS pur : deux boutons radio pilotent l'affichage, la page
@@ -803,6 +838,253 @@ ${people.map((p) => `            <tr>
     </div>`);
 }
 
+
+// ------------------------------------------------------ changement de caisse
+
+/** État d'un assuré dans le dossier de changement. */
+export interface ChangeCandidate {
+  clientUid: string;
+  name: string;
+  /** Caisse quittée, telle qu'enregistrée sur le contrat actuel. */
+  currentInsurer?: string;
+  policyNumber?: string;
+  /** Caisse retenue par la comparaison. */
+  targetInsurer?: string;
+  targetModel?: string;
+  franchise?: number;
+  monthlySaving?: number;
+  /** Faces de pièce d'identité déjà déposées. */
+  identityKinds: string[];
+  /** La lettre de résiliation exige un contrat en cours. */
+  hasContract: boolean;
+  /** La comparaison ne propose rien de mieux que le contrat actuel. */
+  alreadyOptimal: boolean;
+}
+
+/**
+ * Page du changement de caisse.
+ *
+ * Elle remplace l'ancien message d'indisponibilité. Le service consiste à
+ * produire les deux courriers que la loi impose — résilier l'ancienne caisse,
+ * demander l'affiliation à la nouvelle — et à rappeler l'échéance qui les
+ * rend valables.
+ *
+ * Ce que nous ne faisons pas est dit aussi clairement : les lettres sont à
+ * envoyer par l'assuré, en recommandé. Laisser croire à un envoi automatique
+ * serait la pire des promesses, puisque son échec ne se verrait qu'en janvier.
+ */
+export function renderChange(o: {
+  email: string;
+  csrf: string;
+  effectiveYear: number;
+  deadline: Date;
+  candidates: ChangeCandidate[];
+  hasSignature: boolean;
+  /**
+   * L'assuré a-t-il déjà donné son avis ?
+   *
+   * Les lettres ne sont produites qu'ensuite. Le service est jeune : sans
+   * retour de ceux qui s'en servent, il se construirait à l'aveugle. Quelques
+   * questions contre deux courriers prêts à poster, c'est un échange honnête,
+   * et il n'est demandé qu'une fois.
+   */
+  hasFeedback: boolean;
+  savings?: { monthly: number; yearly: number } | null;
+  /** Choix de caisse fait sur la comparaison, à reporter sur les lettres. */
+  query?: string;
+  notice?: string;
+  error?: string;
+}): string {
+  const suffix = o.query ? `?${o.query}` : '';
+  const surveyHref = `/espace/souscription${o.query ? `?${o.query}` : ''}`;
+  const deadlinePassed = o.deadline.getTime() < Date.now();
+
+  const savings = o.savings && o.savings.monthly > 0
+    ? `    <div class="stats" style="margin-bottom:1rem">
+      <div class="stat accent"><span class="value">${money(o.savings.monthly)}</span>
+        <span class="label">par mois</span></div>
+      <div class="stat"><span class="value">${money(o.savings.yearly)}</span>
+        <span class="label">soit par an</span></div>
+    </div>`
+    : '';
+
+  // Le questionnaire ouvre l'accès aux lettres : il passe donc en premier,
+  // avant même la signature.
+  const survey = o.hasFeedback
+    ? ''
+    : `    <div class="card">
+      <h2>Quelques questions, puis vos lettres</h2>
+      <p>Helvetik est jeune et se construit avec ceux qui l'utilisent. Avant de
+      produire vos courriers, dites-nous ce que vous attendez du service : trois
+      minutes, une seule fois.</p>
+      <div class="actions"><a class="btn" href="${surveyHref}">Répondre au questionnaire</a></div>
+    </div>`;
+
+  // La signature conditionne toutes les lettres : elle vient ensuite.
+  const signature = o.hasSignature
+    ? `    <div class="card">
+      <h2>Votre signature</h2>
+      <p class="msg ok">Enregistrée. Elle est reproduite sur chacune de vos lettres.</p>
+      <div class="actions">
+        <a class="btn btn-ghost" href="/espace/signature">La remplacer</a>
+      </div>
+    </div>`
+    : `    <div class="card">
+      <h2>Il manque votre signature</h2>
+      <p>Une résiliation non signée est refusée. Nous vous la demandons
+      <strong>une seule fois</strong> : elle est conservée chiffrée, comme votre pièce
+      d'identité, et reprise sur tous vos courriers.</p>
+      <div class="actions"><a class="btn" href="/espace/signature">Signer maintenant</a></div>
+    </div>`;
+
+  const row = (candidate: ChangeCandidate) => {
+    // Déjà au meilleur tarif : proposer de résilier pour se réaffilier à la
+    // même caisse, au même modèle, serait absurde — et coûterait à l'assuré
+    // des recommandés pour rien.
+    if (candidate.alreadyOptimal) {
+      return `      <div class="card">
+        <h2>${escapeHtml(candidate.name)}</h2>
+        <p class="msg ok">Déjà au meilleur tarif : ${
+        candidate.currentInsurer ? escapeHtml(candidate.currentInsurer) : 'sa caisse actuelle'}${
+        candidate.targetModel ? ` — ${escapeHtml(candidate.targetModel)}` : ''
+      } est l'offre la moins chère de sa région pour ses critères. Aucune lettre à envoyer.</p>
+      </div>`;
+    }
+
+    const missing: string[] = [];
+    if (!o.hasFeedback) {
+      missing.push('vos réponses au questionnaire');
+    }
+    if (!o.hasSignature) {
+      missing.push('votre signature');
+    }
+    if (candidate.identityKinds.length < 2) {
+      missing.push('les deux faces de la pièce d\'identité');
+    }
+    if (!candidate.hasContract) {
+      missing.push('le contrat actuel, pour son numéro de police');
+    }
+
+    const target = candidate.targetInsurer
+      ? `<strong>${escapeHtml(candidate.targetInsurer)}</strong>${
+        candidate.targetModel ? ` — ${escapeHtml(candidate.targetModel)}` : ''}`
+      : '<span class="muted">à choisir dans la comparaison</span>';
+
+    const letters = missing.length
+      ? `        <p class="msg warn">Avant de produire les lettres, il manque ${
+        escapeHtml(missing.join(', '))}.</p>
+        <div class="actions">
+          ${!o.hasFeedback
+            ? `<a class="btn" href="${surveyHref}">Répondre au questionnaire</a>`
+            : ''}
+          ${candidate.identityKinds.length < 2
+            ? `<a class="btn btn-ghost" href="/espace/assures/${escapeHtml(candidate.clientUid)}/piece">Déposer la pièce</a>`
+            : ''}
+          ${!candidate.hasContract
+            ? '<a class="btn btn-ghost" href="/espace/assurances/nouvelle">Ajouter le contrat</a>'
+            : ''}
+        </div>`
+      : `        <div class="actions">
+          <a class="btn" href="/espace/changement/${escapeHtml(candidate.clientUid)}/resiliation${suffix}">
+            Lettre de résiliation</a>
+          <a class="btn" href="/espace/changement/${escapeHtml(candidate.clientUid)}/affiliation${suffix}">
+            Lettre d'affiliation</a>
+        </div>`;
+
+    return `      <div class="card">
+        <h2>${escapeHtml(candidate.name)}</h2>
+        <p>Quitte ${candidate.currentInsurer
+          ? `<strong>${escapeHtml(candidate.currentInsurer)}</strong>`
+          : '<span class="muted">caisse actuelle inconnue</span>'}${
+        candidate.policyNumber ? ` (police ${escapeHtml(candidate.policyNumber)})` : ''}
+        pour ${target}.</p>
+        ${candidate.franchise !== undefined
+          ? `<p class="muted">Franchise ${candidate.franchise} CHF${
+            candidate.monthlySaving ? ` · ${money(candidate.monthlySaving)} d'économie par mois` : ''}.</p>`
+          : ''}
+${letters}
+      </div>`;
+  };
+
+  return sitePage('Helvetik — Changer de caisse', { email: o.email, active: 'optimisation' },
+    `    <h1>Changer de caisse pour ${o.effectiveYear}</h1>
+    <p class="lead">Deux courriers suffisent : résilier votre caisse actuelle, et demander
+    votre affiliation à la nouvelle. Nous les préparons, remplis et signés ; vous les
+    envoyez en recommandé.</p>
+${messages({ notice: o.notice, error: o.error })}
+${deadlinePassed
+      ? `    <p class="msg err"><strong>L'échéance du ${formatDate(o.deadline)} est passée.</strong>
+      Une résiliation reçue après cette date ne prend effet qu'un an plus tard. Vous
+      pouvez tout de même préparer vos courriers pour l'an prochain.</p>`
+      : `    <p class="msg warn"><strong>À envoyer avant le ${formatDate(o.deadline)}.</strong>
+      C'est la date de <em>réception</em> par la caisse qui compte, pas celle de l'envoi :
+      comptez quelques jours de poste, et gardez le récépissé du recommandé.</p>`}
+${savings}
+${survey}
+${signature}
+${o.candidates.length
+      ? o.candidates.map(row).join('\n')
+      : '    <div class="card"><p class="empty">Aucun assuré à faire changer de caisse.</p></div>'}
+
+    <div class="card">
+      <h2>Ce service va s'étoffer</h2>
+      <p>Aujourd'hui nous préparons vos courriers ; demain nous voulons les envoyer
+      et suivre les confirmations à votre place. ${o.hasFeedback
+        ? 'Vos réponses orientent ce que nous construisons ensuite — merci.'
+        : 'Vos réponses orienteront ce que nous construisons ensuite.'}</p>
+      ${o.hasFeedback
+        ? `<div class="actions"><a class="link" href="${surveyHref}">Modifier mes réponses</a></div>`
+        : ''}
+    </div>
+
+    <div class="card">
+      <h2>Ce que nous faisons, et ce qui reste à votre charge</h2>
+      <ul class="muted" style="margin:.4rem 0 0;padding-left:1.1rem">
+        <li>Nous produisons les lettres, avec vos coordonnées, votre numéro de police,
+        la franchise et le modèle retenus, et votre signature.</li>
+        <li><strong>Vous les envoyez vous-même</strong>, en recommandé, avec une copie
+        de votre pièce d'identité. Nous n'expédions rien à votre place : un courrier
+        perdu ne se découvrirait qu'en janvier.</li>
+        <li>Votre couverture n'est jamais interrompue : la nouvelle caisse atteste
+        auprès de l'ancienne avant que la résiliation ne prenne effet.</li>
+      </ul>
+    </div>`);
+}
+
+/** Page de recueil de la signature. */
+export function renderSignature(o: {
+  email: string;
+  csrf: string;
+  hasSignature: boolean;
+  returnTo: string;
+  notice?: string;
+  error?: string;
+}): string {
+  return sitePage('Helvetik — Ma signature', { email: o.email, active: 'optimisation' },
+    `    <h1>Ma signature</h1>
+    <p class="lead">Elle sera reproduite sur vos lettres de résiliation et d'affiliation.
+    Nous ne vous la demandons qu'une fois : elle est conservée chiffrée, comme votre
+    pièce d'identité, et vous pouvez la supprimer à tout moment.</p>
+${messages({ notice: o.notice, error: o.error })}
+${o.hasSignature
+      ? `    <div class="card">
+      <h2>Signature enregistrée</h2>
+      <img class="sig-preview" src="/espace/signature/image" alt="Votre signature">
+      <div class="actions" style="margin-top:.75rem">
+        <a class="btn" href="${escapeHtml(o.returnTo)}">Continuer</a>
+        <form method="post" action="/espace/signature/supprimer" style="display:inline"
+              onsubmit="return confirm('Supprimer votre signature ?')">
+          ${csrfField(o.csrf)}
+          <button type="submit" class="btn-danger">Supprimer</button>
+        </form>
+      </div>
+      <p class="muted" style="margin-top:.5rem">Vous pouvez en tracer une nouvelle
+      ci-dessous : elle remplacera celle-ci.</p>
+    </div>`
+      : ''}
+${signaturePad({ action: '/espace/signature', csrf: o.csrf })}`);
+}
+
 // ---------------------------------------------------------- souscription
 
 /**
@@ -818,6 +1100,8 @@ export function renderSubscription(o: {
   values: Values;
   savings?: { monthly: number; yearly: number } | null;
   strategy?: string;
+  /** Caisse retenue sur la comparaison, à reconduire après le questionnaire. */
+  picked?: { insurerId?: string; tariffCode?: string; option?: string };
   error?: string;
   invalid?: string[];
 }): string {
@@ -831,15 +1115,16 @@ export function renderSubscription(o: {
       strategyLabel ? `, en retenant ${strategyLabel}` : ''}.</p>`
     : '';
 
-  return sitePage('Helvetik — Souscrire', { email: o.email, active: 'optimisation' },
-    `    <h1>Avant d'aller plus loin</h1>
-    <div class="msg warn">
-      <strong>Aucune assurance ne sera souscrite aujourd'hui.</strong>
-      Helvetik est en phase de test : le comparateur fonctionne sur les tarifs officiels
-      de l'OFSP, mais la souscription et la résiliation ne sont pas encore ouvertes.
-      Rien de ce que vous faites ici n'engage votre couverture actuelle, qui reste
-      inchangée.
+  return sitePage('Helvetik — Avant vos lettres', { email: o.email, active: 'optimisation' },
+    `    <h1>Avant de préparer vos lettres</h1>
+    <div class="msg info">
+      <strong>Trois minutes, une seule fois.</strong>
+      Helvetik se construit avec ceux qui l'utilisent : vos réponses décident de ce que
+      nous développons ensuite. Vos deux courriers — résiliation et affiliation — sont
+      prêts juste après.
     </div>
+    <p class="muted">Rien de ce que vous faites ici n'engage votre couverture actuelle :
+    les lettres sont des documents à relire, signer et poster vous-même.</p>
 ${messages({ error: o.error })}
     <div class="card">
       <h2>Où en est le service</h2>
@@ -857,6 +1142,11 @@ ${recap}
       ${csrfField(o.csrf)}
       <input type="hidden" name="strategy" value="${escapeHtml(o.strategy ?? '')}">
       <input type="hidden" name="savingsMonthly" value="${escapeHtml(String(o.savings?.monthly ?? ''))}">
+      ${/* Le choix de caisse traverse le questionnaire : sans lui, l'assuré
+            reviendrait au dossier sur la caisse la moins chère, pas la sienne. */ ''}
+      ${o.picked?.insurerId ? `<input type="hidden" name="caisse" value="${escapeHtml(o.picked.insurerId)}">` : ''}
+      ${o.picked?.tariffCode ? `<input type="hidden" name="modele" value="${escapeHtml(o.picked.tariffCode)}">` : ''}
+      ${o.picked?.option ? `<input type="hidden" name="option" value="${escapeHtml(o.picked.option)}">` : ''}
 ${errorSummary()}
       <div class="card">
         <h2>Votre avis nous est utile</h2>
@@ -918,6 +1208,8 @@ export function renderSubscriptionThanks(o: {
   email: string;
   betaTester: boolean;
   recontact: boolean;
+  /** Adresse du dossier de changement, choix de caisse compris. */
+  changeHref?: string;
 }): string {
   const next = o.betaTester
     ? `      <p>Vous êtes inscrit sur la liste des bêta-testeurs. Nous reviendrons vers vous
@@ -931,13 +1223,13 @@ export function renderSubscriptionThanks(o: {
   return sitePage('Helvetik — Merci', { email: o.email, active: 'optimisation' },
     `    <h1>Merci</h1>
     <div class="card">
-      <p class="msg ok">Votre réponse est enregistrée.</p>
+      <p class="msg ok">Votre réponse est enregistrée. Vos lettres sont débloquées.</p>
 ${next}
       <p class="muted">Rappel : aucune assurance n'a été souscrite ni résiliée. Votre
-      couverture actuelle est inchangée.</p>
+      couverture actuelle est inchangée tant que vos courriers ne sont pas partis.</p>
       <div class="actions">
-        <a class="btn" href="/espace/optimisation">Revoir mes offres</a>
-        <a class="btn btn-ghost" href="/espace">Retour à mon espace</a>
+        <a class="btn" href="${escapeHtml(o.changeHref || '/espace/changement')}">Préparer mes lettres</a>
+        <a class="btn btn-ghost" href="/espace/optimisation">Revoir mes offres</a>
       </div>
     </div>`);
 }

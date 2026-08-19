@@ -1,65 +1,179 @@
-# Socle commun aux deux environnements.
+# Helvetik — pile complète, développement et production dans un seul fichier.
 #
-#   développement : docker compose up -d
-#                   (docker-compose.override.yml est appliqué automatiquement :
-#                    Mailpit, emails capturés, ports ouverts)
+# ─────────────────────────────────────────────────────────────────────────────
+#  UNE SEULE VARIABLE À CHANGER, dans le fichier .env placé à côté :
 #
-#   production    : docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-#                   (SMTP réel, secrets lus dans le fichier .env de la racine)
+#      COMPOSE_PROFILES=DEV     développement (par défaut)
+#      COMPOSE_PROFILES=PROD    production
 #
-# Les valeurs sensibles ne figurent jamais ici : elles viennent de l'environnement.
+#  Puis, dans les deux cas, la même commande :
+#
+#      docker compose up -d --build
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Ce que le profil change :
+#
+#                        DEV                         PROD
+#   application          NODE_ENV=development        NODE_ENV=production
+#   secret de session    valeur publique assumée     exigé dans .env
+#   emails               capturés par Mailpit        expédiés par Postfix
+#   liens des emails     déduits de la requête       APP_BASE_URL fait foi
+#   pièces d'identité    clé de développement        clé exigée dans .env
+#
+# Le reste — base de données, modèle de langage, tâches planifiées — est
+# identique : c'est justement ce qui rend le développement représentatif.
+#
+# Les valeurs obligatoires en production ne sont pas contrôlées ici : Compose
+# résout toutes les variables du fichier avant de savoir quel profil est actif,
+# si bien qu'une exigence posée sur la production empêcherait le démarrage en
+# développement. Le contrôle est fait par l'application, qui refuse de démarrer
+# en production sans SESSION_SECRET ni DOCUMENT_ENCRYPTION_KEY et signale
+# bruyamment l'absence d'APP_BASE_URL.
+
+# --------------------------------------------------------- fragments communs
+#
+# Rassemblés ici pour que les deux définitions de l'application ne diffèrent
+# que par ce qui change réellement d'un environnement à l'autre.
+
+x-api: &api
+  build: ./api
+  restart: unless-stopped
+  volumes:
+    # Les données de langue de la reconnaissance de texte sont téléchargées au
+    # premier usage : les conserver évite de les retélécharger à chaque
+    # recréation du conteneur.
+    - tessdata:/app/.tessdata
+  networks:
+    - app-network
+
+x-api-env: &api-env
+  MONGODB_URI: mongodb://mongodb:27017/insurance-app
+  TZ: ${TZ:-Europe/Zurich}
+  ROOT_ADMIN_EMAIL: ${ROOT_ADMIN_EMAIL:-root@helvetik.local}
+
+  # Tâches planifiées : rappels d'échéance et mise à jour annuelle des primes.
+  NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-true}
+  NOTIFICATIONS_CRON: ${NOTIFICATIONS_CRON:-0 8 * * *}
+  NOTIFICATIONS_RUN_ON_START: ${NOTIFICATIONS_RUN_ON_START:-false}
+  PREMIUM_SYNC_ENABLED: ${PREMIUM_SYNC_ENABLED:-true}
+  PREMIUM_SYNC_CRON: ${PREMIUM_SYNC_CRON:-0 4 1 * *}
+
+  # Reconnaissance de texte des documents déposés.
+  OCR_LANGUAGES: ${OCR_LANGUAGES:-fra+deu}
+  TESSERACT_CACHE_PATH: /app/.tessdata
+
+  # Lecture des polices d'assurance : le texte sorti de la reconnaissance
+  # optique est confié à un modèle de langage local, jamais à un service
+  # externe — une police porte nom, adresse, n° AVS et n° de police.
+  OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+  OLLAMA_ENABLED: ${OLLAMA_ENABLED:-true}
+  OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-90000}
+
+  # Confirmation d'email : désactivée le temps de la phase de mesure.
+  # Remettre à true rétablit le parcours complet, sans autre changement.
+  # Ce réglage est aussi pilotable depuis la console d'administration.
+  EMAIL_CONFIRMATION_REQUIRED: ${EMAIL_CONFIRMATION_REQUIRED:-false}
 
 services:
+
+  # ------------------------------------------------------------ application
+  #
+  # Deux définitions, une par profil. Elles ne peuvent pas tourner ensemble :
+  # le profil actif en désigne exactement une.
+
   api:
-    build: ./api
-    restart: unless-stopped
+    <<: *api
+    profiles: ["DEV"]
+    ports:
+      - "${API_PORT:-3000}:3000"
     environment:
-      - MONGODB_URI=mongodb://mongodb:27017/insurance-app
-      - TZ=${TZ:-Europe/Zurich}
-      - ROOT_ADMIN_EMAIL=${ROOT_ADMIN_EMAIL:-root@helvetik.local}
-      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-true}
-      - NOTIFICATIONS_CRON=${NOTIFICATIONS_CRON:-0 8 * * *}
-      - NOTIFICATIONS_RUN_ON_START=${NOTIFICATIONS_RUN_ON_START:-false}
-      - PREMIUM_SYNC_ENABLED=${PREMIUM_SYNC_ENABLED:-true}
-      - PREMIUM_SYNC_CRON=${PREMIUM_SYNC_CRON:-0 4 1 * *}
-      - OCR_LANGUAGES=${OCR_LANGUAGES:-fra+deu}
-      - TESSERACT_CACHE_PATH=/app/.tessdata
-      - MAIL_FROM=${MAIL_FROM:-Helvetik <no-reply@helvetik.local>}
-      # Chiffrement des pièces d'identité conservées. Sans elle, une clé de
-      # développement publique prend le relais et le démarrage le signale ;
-      # en production, l'absence de clé arrête le serveur.
-      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:-}
-      # Lecture des polices d'assurance : le texte sorti de la reconnaissance
-      # optique est confié à un modèle de langage local, jamais à un service
-      # externe — une police porte nom, adresse, n° AVS et n° de police.
-      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
-      - OLLAMA_ENABLED=${OLLAMA_ENABLED:-true}
-      - OLLAMA_TIMEOUT_MS=${OLLAMA_TIMEOUT_MS:-90000}
-    volumes:
-      # Les données de langue de la reconnaissance de texte sont téléchargées
-      # au premier usage : les conserver évite de les retélécharger à chaque
-      # recréation du conteneur.
-      - tessdata:/app/.tessdata
+      <<: *api-env
+      NODE_ENV: development
+      # Secret de développement assumé : il est public et sans valeur.
+      SESSION_SECRET: dev-only-secret
+      # Les emails partent dans Mailpit et ne sortent jamais de la machine.
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      # Sans clé, une clé de développement publique prend le relais et le
+      # démarrage le signale. Acceptable ici, jamais en production.
+      DOCUMENT_ENCRYPTION_KEY: ${DOCUMENT_ENCRYPTION_KEY:-}
+      # APP_BASE_URL volontairement absent : les liens des emails sont déduits
+      # de l'adresse par laquelle le visiteur est arrivé. Un compte créé depuis
+      # un téléphone sur http://192.168.1.x:3000 reçoit donc un lien cliquable
+      # depuis ce téléphone.
     depends_on:
       - mongodb
       - ollama
-    networks:
-      - app-network
+      - mailpit
+
+  api-prod:
+    <<: *api
+    profiles: ["PROD"]
+    ports:
+      - "${API_PORT:-3000}:3000"
+    environment:
+      <<: *api-env
+      NODE_ENV: production
+
+      # Obligatoire : sans lui, l'application s'arrête au démarrage. Un cookie
+      # de session forgé donnerait accès à n'importe quel compte.
+      SESSION_SECRET: ${SESSION_SECRET:-}
+
+      # Obligatoire en pratique : adresse publique du service, qui fait autorité
+      # pour les liens envoyés par email. En production, l'en-tête Host de la
+      # requête est fourni par le client et ne peut pas servir de référence.
+      APP_BASE_URL: ${APP_BASE_URL:-}
+
+      # Obligatoire : chiffrement des pièces d'identité conservées. Sans clé,
+      # le serveur s'arrête — mieux vaut cela que des cartes d'identité en clair.
+      DOCUMENT_ENCRYPTION_KEY: ${DOCUMENT_ENCRYPTION_KEY:-}
+
+      # Par défaut, le relais Postfix ci-dessous, joint sur le réseau interne :
+      # ni TLS ni authentification, le trafic ne sort pas de Docker. Renseigner
+      # SMTP_HOST dans .env bascule sur un relais externe.
+      SMTP_HOST: ${SMTP_HOST:-mailer}
+      SMTP_PORT: ${SMTP_PORT:-25}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      # Le relais interne présente un certificat auto-signé : inutile de
+      # chiffrer un trafic qui ne quitte pas le réseau Docker. À passer à false
+      # dès que SMTP_HOST désigne un relais accessible par Internet.
+      SMTP_IGNORE_TLS: ${SMTP_IGNORE_TLS:-true}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-Helvetik <no-reply@helvetik.local>}
+
+      # Derrière un reverse proxy terminant TLS, pour que req.protocol vaille
+      # « https » et que les cookies soient bien marqués Secure.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      APP_ALLOWED_HOSTS: ${APP_ALLOWED_HOSTS:-}
+    depends_on:
+      - mongodb
+      - ollama
+      - mailer
+
+  # ---------------------------------------------------------- base de données
+  #
+  # Commune aux deux profils, y compris le port publié : il est lié à
+  # l'interface locale, donc joignable par Compass sur la machine de
+  # développement, et inaccessible depuis Internet sur le serveur.
 
   mongodb:
     image: mongo:latest
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MONGO_PORT:-27017}:27017"
     volumes:
       - mongodb_data:/data/db
     networks:
       - app-network
 
-  # Modèle de langage local, chargé de structurer le texte des polices.
+  # --------------------------------------------- modèle de langage local
   #
   # Volontairement **sans `ports:`** : il n'est joignable que depuis le réseau
   # Docker, donc uniquement par l'API. Une interface d'inférence exposée à
   # Internet serait à la fois un vecteur d'abus et une fuite de données.
+
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
@@ -88,10 +202,60 @@ services:
     networks:
       - app-network
 
+  # ------------------------------------------------------------------ emails
+
+  # DEV — capture tous les emails sans jamais les transmettre à l'extérieur.
+  # Interface web sur http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    profiles: ["DEV"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1025:1025"  # SMTP
+      - "127.0.0.1:8025:8025"  # interface web + API REST
+    environment:
+      - MP_MAX_MESSAGES=500
+      - MP_SMTP_AUTH_ACCEPT_ANY=1
+      - MP_SMTP_AUTH_ALLOW_INSECURE=1
+    networks:
+      - app-network
+
+  # PROD — relais SMTP sortant.
+  #
+  # Il expédie réellement les messages, sans dépendre d'un service tiers. En
+  # contrepartie, la délivrabilité dépend entièrement de la réputation du
+  # serveur : sans enregistrement PTR ni SPF, une partie des destinataires
+  # classera les messages en indésirables, voire les refusera. La page de
+  # confirmation d'inscription invite donc à regarder dans les spams.
+  #
+  # Deux conditions matérielles, à vérifier avant de s'étonner :
+  #   - le port 25 sortant doit être ouvert par l'hébergeur (souvent bloqué) ;
+  #   - le domaine doit avoir un SPF autorisant l'IP du serveur.
+  mailer:
+    image: boky/postfix:latest
+    profiles: ["PROD"]
+    restart: unless-stopped
+    environment:
+      # Domaines pour lesquels le relais accepte d'expédier.
+      - ALLOWED_SENDER_DOMAINS=${MAIL_DOMAIN:-MAIL_DOMAIN-non-defini}
+      # Nom annoncé au serveur distant : il doit correspondre au PTR de l'IP.
+      - POSTFIX_myhostname=${MAIL_HOSTNAME:-${MAIL_DOMAIN:-}}
+      # Signature DKIM : la paire de clés est générée au premier démarrage et
+      # conservée dans le volume. Sans l'enregistrement DNS correspondant
+      # (voir le README), la signature ne sert à rien : Gmail et Outlook
+      # exigent que la clé publique soit publiée.
+      - DKIM_AUTOGENERATE=1
+      - DKIM_SELECTOR=mail
+    volumes:
+      - dkim_keys:/etc/opendkim/keys
+    networks:
+      - app-network
+
 volumes:
   mongodb_data:
   tessdata:
   ollama_models:
+  dkim_keys:
 
 networks:
   app-network:

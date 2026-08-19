@@ -2,34 +2,42 @@ import { Schema, model, Document } from 'mongoose';
 import { randomUUID } from 'crypto';
 
 /**
- * Pièces d'identité déposées par les assurés (md_identity_document).
+ * Documents personnels déposés par les assurés (md_identity_document).
  *
- * Elles ne servent pas qu'à la reconnaissance de texte : une lettre de
- * résiliation ou d'affiliation doit être accompagnée d'une copie de la pièce.
- * Il faut donc les conserver, et non plus seulement les lire puis les effacer.
+ * Deux natures, un même coffre : les deux faces de la pièce d'identité, et la
+ * signature manuscrite. Toutes trois servent aux courriers adressés aux
+ * caisses — une résiliation doit être signée et accompagnée d'une copie de la
+ * pièce — et toutes trois demandent les mêmes précautions.
  *
- * Conséquence directe : ce sont les données les plus sensibles de toute la
- * base. Le contenu est **chiffré** (AES-256-GCM, cf. document-vault.service)
- * et n'est jamais renvoyé par une lecture ordinaire — `select: false` oblige
- * chaque appelant à le demander explicitement.
+ * Ce sont les données les plus sensibles de la base. Le contenu est **chiffré**
+ * (AES-256-GCM, cf. document-vault.service) et n'est jamais renvoyé par une
+ * lecture ordinaire : `select: false` oblige chaque appelant à le demander.
  *
- * Une pièce par face et par assuré : le recto porte la photo, le verso la
- * bande lisible par machine. Les deux sont exigées par les caisses.
+ * Un document par nature et par assuré ; un nouveau dépôt remplace l'ancien.
  */
 
-export const DOCUMENT_SIDES = ['RECTO', 'VERSO'] as const;
-export type DocumentSide = typeof DOCUMENT_SIDES[number];
+export const DOCUMENT_KINDS = ['RECTO', 'VERSO', 'SIGNATURE'] as const;
+export type DocumentKind = typeof DOCUMENT_KINDS[number];
 
-export const SIDE_LABELS: Record<DocumentSide, string> = {
+/** Les deux faces de la pièce d'identité, à demander ensemble. */
+export const IDENTITY_KINDS = ['RECTO', 'VERSO'] as const;
+
+export const KIND_LABELS: Record<DocumentKind, string> = {
   RECTO: 'recto',
-  VERSO: 'verso'
+  VERSO: 'verso',
+  SIGNATURE: 'signature'
 };
+
+// Anciens noms, conservés le temps que les appelants soient tous convertis.
+export const DOCUMENT_SIDES = IDENTITY_KINDS;
+export type DocumentSide = DocumentKind;
+export const SIDE_LABELS = KIND_LABELS;
 
 export interface IIdentityDocument extends Document {
   uid: string;
   userUid: string;
   clientUid: string;
-  side: DocumentSide;
+  kind: DocumentKind;
   /** Type du fichier d'origine, nécessaire pour le restituer tel quel. */
   mimetype: string;
   filename: string;
@@ -66,10 +74,10 @@ const identityDocumentSchema = new Schema<IIdentityDocument>({
     required: true,
     index: true
   },
-  side: {
+  kind: {
     type: String,
     required: true,
-    enum: { values: DOCUMENT_SIDES, message: 'Face invalide.' }
+    enum: { values: DOCUMENT_KINDS, message: 'Nature de document invalide.' }
   },
   mimetype: {
     type: String,
@@ -119,8 +127,8 @@ const identityDocumentSchema = new Schema<IIdentityDocument>({
   collection: 'md_identity_document'
 });
 
-// Une seule pièce par face et par assuré : un nouveau dépôt remplace l'ancien.
-identityDocumentSchema.index({ clientUid: 1, side: 1 }, { unique: true });
+// Un seul document par nature et par assuré : un dépôt remplace l'ancien.
+identityDocumentSchema.index({ clientUid: 1, kind: 1 }, { unique: true });
 
 export const IdentityDocument = model<IIdentityDocument>(
   'IdentityDocument',

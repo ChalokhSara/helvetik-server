@@ -21,20 +21,27 @@ import {
 import { readClientPayload } from '../utils/client-payload';
 import { completeAddress, suggestAddresses } from '../services/address.service';
 import {
-  DOCUMENT_SIDES,
-  DocumentSide,
+  DocumentKind,
+  IDENTITY_KINDS,
   IIdentityDocument,
-  SIDE_LABELS
+  KIND_LABELS
 } from '../models/identity-document.model';
 import {
   deleteDocument,
   documentsByClient,
+  hasDocument,
   isAcceptedDocument,
   listDocuments,
   retrieveDocument,
   storeDocument,
   VaultError
 } from '../services/document-vault.service';
+import {
+  cancellationDeadlineFor,
+  LetterKind,
+  letterFilename,
+  renderLetter
+} from '../services/letter.service';
 import { readInsurancePayload } from '../utils/insurance-payload';
 import { monthlyPremium, cancellationDeadline } from '../utils/insurance-payload';
 import {
@@ -46,8 +53,14 @@ import {
   describeClient,
   PHONE_REQUIRED_MESSAGE
 } from '../services/household.service';
-import { optimiseLamal } from '../services/lamal-optimisation.service';
-import { Catalogue, catalogueFor, premiumFor } from '../services/premium-catalogue.service';
+import { modelLabel, optimiseLamal } from '../services/lamal-optimisation.service';
+import {
+  Catalogue,
+  catalogueFor,
+  insurerAddressByName,
+  premiumFor
+} from '../services/premium-catalogue.service';
+import { activeYear } from '../services/premium-import.service';
 import { readPolicy } from '../services/policy-llm.service';
 import * as views from '../views/site/pages';
 import { StoredSide, Values } from '../views/site/forms';
@@ -553,7 +566,7 @@ function identityValues(client: IClient): Values {
 
 function storedSides(documents: IIdentityDocument[]): StoredSide[] {
   return documents.map((d) => ({
-    side: d.side,
+    side: d.kind as 'RECTO' | 'VERSO',
     filename: d.filename,
     size: d.size,
     uploadedAt: d.uploadedAt
@@ -586,9 +599,11 @@ async function identityTarget(
 }
 
 /** Face demandée dans l'URL, refusée si elle n'existe pas. */
-function readSide(value: string): DocumentSide | null {
+function readSide(value: string): 'RECTO' | 'VERSO' | null {
   const side = String(value || '').toUpperCase();
-  return DOCUMENT_SIDES.includes(side as DocumentSide) ? (side as DocumentSide) : null;
+  return (IDENTITY_KINDS as readonly string[]).includes(side)
+    ? (side as 'RECTO' | 'VERSO')
+    : null;
 }
 
 async function renderIdentityPage(
@@ -663,7 +678,7 @@ async function depositIdentityDocument(req: Request, res: Response) {
     }
     if (!file) {
       return await renderIdentityPage(req, res, target, {
-        error: `Aucun fichier reçu pour le ${SIDE_LABELS[side]}.`, status: 400
+        error: `Aucun fichier reçu pour le ${KIND_LABELS[side]}.`, status: 400
       });
     }
     if (!isAcceptedDocument(file.mimetype, file.originalname)) {
@@ -676,7 +691,7 @@ async function depositIdentityDocument(req: Request, res: Response) {
     const stored = await storeDocument({
       userUid: user.uid,
       clientUid: target.client.uid,
-      side,
+      kind: side,
       path: file.path,
       filename: file.originalname,
       mimetype: file.mimetype
@@ -688,8 +703,8 @@ async function depositIdentityDocument(req: Request, res: Response) {
     const values = identityValues(target.client);
     const warnings: string[] = [];
     let info = stored.replaced
-      ? `Le ${SIDE_LABELS[side]} a remplacé la pièce précédente.`
-      : `Le ${SIDE_LABELS[side]} est enregistré.`;
+      ? `Le ${KIND_LABELS[side]} a remplacé la pièce précédente.`
+      : `Le ${KIND_LABELS[side]} est enregistré.`;
 
     try {
       const result = await extractFromDocument(file.path, file.mimetype, file.originalname);
@@ -1670,6 +1685,356 @@ async function currentSavings(userUid: string): Promise<{
   }
 }
 
+
+// ------------------------------------------------------ changement de caisse
+//
+// Le service : produire les deux courriers qu'un changement de caisse exige,
+// remplis et signés. Ils restent à envoyer par l'assuré, en recommandé — un
+// envoi que nous ferions à sa place et qui échouerait ne se verrait qu'en
+// janvier, quand plus rien n'est rattrapable.
+
+/**
+ * Année visée par le changement.
+ *
+ * Tant que l'échéance de novembre n'est pas passée, le changement porte sur
+ * l'année suivante. Après, il ne peut plus viser que celle d'après : une
+ * résiliation reçue en décembre prend effet un an plus tard.
+ */
+function targetYear(now = new Date()): number {
+  const nextYear = now.getFullYear() + 1;
+  return now.getTime() <= cancellationDeadlineFor(nextYear).getTime()
+    ? nextYear
+    : nextYear + 1;
+}
+
+/**
+ * L'assuré a-t-il répondu au questionnaire ?
+ *
+ * C'est la condition d'accès aux lettres. Le service est en construction et
+ * n'a aucun autre moyen de savoir ce qu'en attendent ceux qui s'en servent :
+ * un questionnaire simplement proposé à côté du bouton utile n'aurait jamais
+ * été rempli. Il n'est demandé qu'une fois, et les réponses restent
+ * modifiables.
+ */
+async function hasAnsweredSurvey(userUid: string): Promise<boolean> {
+  return Boolean(await Feedback.exists({ userUid }));
+}
+
+/** Signature du titulaire : une seule pour tout le foyer, demandée une fois. */
+async function signatureHolder(userUid: string): Promise<IClient | null> {
+  return accountHolder(userUid);
+}
+
+router.get('/espace/signature', async (req: Request, res: Response) => {
+  const user = req.siteUser!;
+  const holder = await signatureHolder(user.uid);
+  if (!holder) {
+    return res.redirect('/espace/assures/nouveau');
+  }
+
+  res.type('html').send(views.renderSignature({
+    email: user.email,
+    csrf: csrfToken(req),
+    hasSignature: await hasDocument(holder.uid, 'SIGNATURE'),
+    returnTo: '/espace/changement',
+    notice: String(req.query.msg || '') === 'ok' ? 'Signature enregistrée.' : undefined
+  }));
+});
+
+router.post('/espace/signature', upload.single('signature'), verifyUploadCsrf,
+  async (req: Request, res: Response) => {
+    const user = req.siteUser!;
+    const holder = await signatureHolder(user.uid);
+
+    if (!holder) {
+      if (req.file) {
+        await unlink(req.file.path).catch(() => undefined);
+      }
+      return res.redirect('/espace/assures/nouveau');
+    }
+
+    const file = req.file;
+    const fail = async (error: string) =>
+      res.status(400).type('html').send(views.renderSignature({
+        email: user.email,
+        csrf: csrfToken(req),
+        hasSignature: await hasDocument(holder.uid, 'SIGNATURE'),
+        returnTo: '/espace/changement',
+        error
+      }));
+
+    try {
+      if (!file) {
+        return await fail('Aucune signature reçue : tracez-la, ou déposez-en une photo.');
+      }
+      if (!isAcceptedDocument(file.mimetype, file.originalname)) {
+        return await fail('Format non pris en charge : déposez une image.');
+      }
+
+      await storeDocument({
+        userUid: user.uid,
+        clientUid: holder.uid,
+        kind: 'SIGNATURE',
+        path: file.path,
+        filename: file.originalname || 'signature.png',
+        mimetype: file.mimetype
+      });
+      res.redirect('/espace/signature?msg=ok');
+    } catch (err) {
+      console.error('Erreur d\'enregistrement de la signature:', err);
+      await fail(err instanceof VaultError
+        ? err.message
+        : 'La signature n\'a pas pu être enregistrée. Réessayez.');
+    } finally {
+      if (file) {
+        await unlink(file.path).catch(() => undefined);
+      }
+    }
+  });
+
+router.get('/espace/signature/image', async (req: Request, res: Response) => {
+  const user = req.siteUser!;
+  const holder = await signatureHolder(user.uid);
+  if (!holder) {
+    return res.status(404).type('text/plain').send('Signature introuvable.');
+  }
+
+  try {
+    const document = await retrieveDocument(holder.uid, 'SIGNATURE', `assuré ${user.uid}`);
+    if (!document) {
+      return res.status(404).type('text/plain').send('Signature introuvable.');
+    }
+    res.set({
+      'Content-Type': document.mimetype,
+      'Cache-Control': 'no-store, private',
+      'X-Content-Type-Options': 'nosniff'
+    }).send(document.content);
+  } catch (err) {
+    res.status(500).type('text/plain').send((err as Error).message);
+  }
+});
+
+router.post('/espace/signature/supprimer', async (req: Request, res: Response) => {
+  const user = req.siteUser!;
+  const holder = await signatureHolder(user.uid);
+  if (holder) {
+    await deleteDocument(holder.uid, 'SIGNATURE');
+  }
+  res.redirect('/espace/signature');
+});
+
+/**
+ * Dossier de changement : un assuré par ligne, avec ce qui manque encore.
+ *
+ * La cible vient de la comparaison. Le paramètre `option` reprend la stratégie
+ * choisie sur la page d'optimisation : regrouper le foyer chez une caisse, ou
+ * placer chacun là où il est le moins cher.
+ */
+router.get('/espace/changement', async (req: Request, res: Response) => {
+  const user = req.siteUser!;
+  const year = targetYear();
+
+  try {
+    const [clients, insurances, holder] = await Promise.all([
+      Client.find({ userUid: user.uid }).sort({ birthdate: 1 }),
+      Insurance.find({ userUid: user.uid, type: 'LAMAL', status: 'ACTIVE' }),
+      accountHolder(user.uid)
+    ]);
+
+    const documents = await documentsByClient(clients.map((c) => c.uid));
+    const hasSignature = holder ? await hasDocument(holder.uid, 'SIGNATURE') : false;
+    const hasFeedback = await hasAnsweredSurvey(user.uid);
+
+    // La comparaison n'est pas indispensable pour résilier : on la tente, et
+    // son absence n'empêche pas de produire les lettres.
+    let result: Awaited<ReturnType<typeof optimiseLamal>> = null;
+    try {
+      result = await optimiseLamal(await buildHouseholdContext(user.uid));
+    } catch {
+      result = null;
+    }
+
+    const individual = String(req.query.option || '') === 'individuel';
+
+    // Offre explicitement choisie sur la page de comparaison. Sans elle, la
+    // moins chère fait office de défaut — mais on ne l'impose pas : changer de
+    // caisse pour son service ou son réseau de médecins est une raison aussi
+    // valable que le prix.
+    const pickedInsurer = Number.parseInt(String(req.query.caisse ?? ''), 10);
+    const pickedTariff = String(req.query.modele || '').trim();
+    const picked = Number.isFinite(pickedInsurer)
+      ? result?.offers.find((offer) => offer.insurerId === pickedInsurer &&
+          (!pickedTariff || offer.tariffCode === pickedTariff))
+      : undefined;
+
+    const grouped = picked || result?.offers?.[0];
+
+    const candidates: views.ChangeCandidate[] = clients.map((client) => {
+      const contract = insurances.find((i) => i.clientUid === client.uid);
+      const plan = result?.individual?.plans.find((p) => p.ref === client.uid);
+      // Un choix explicite prime sur tout : c'est celui de l'assuré.
+      const target = picked || (individual && plan ? plan.best : grouped);
+
+      // Même caisse et même modèle qu'aujourd'hui : il n'y a rien à changer.
+      const sameTariff = Boolean(
+        target && contract &&
+        target.insurer === contract.provider &&
+        (!contract.tariffCode || target.tariffCode === contract.tariffCode)
+      );
+
+      return {
+        clientUid: client.uid,
+        name: describeClient(client),
+        currentInsurer: contract?.provider,
+        policyNumber: contract?.policyNumber,
+        targetInsurer: target?.insurer,
+        targetModel: target ? modelLabel(target) : undefined,
+        franchise: contract?.franchise,
+        monthlySaving: plan?.savings.monthly,
+        identityKinds: (documents.get(client.uid) || [])
+          .map((d) => d.kind)
+          .filter((kind) => kind !== 'SIGNATURE'),
+        hasContract: Boolean(contract),
+        alreadyOptimal: sameTariff
+      };
+    });
+
+    res.type('html').send(views.renderChange({
+      email: user.email,
+      csrf: csrfToken(req),
+      effectiveYear: year,
+      deadline: cancellationDeadlineFor(year),
+      candidates,
+      hasSignature,
+      hasFeedback,
+      // Le choix de caisse voyage tel quel jusqu'aux lettres.
+      query: new URLSearchParams({
+        ...(Number.isFinite(pickedInsurer) ? { caisse: String(pickedInsurer) } : {}),
+        ...(pickedTariff ? { modele: pickedTariff } : {}),
+        ...(individual ? { option: 'individuel' } : {})
+      }).toString(),
+      savings: result
+        ? (individual && result.individual ? result.individual.savings : result.potentialSavings)
+        : null,
+      notice: String(req.query.msg || '') === 'signee' ? 'Signature enregistrée.' : undefined
+    }));
+  } catch (err) {
+    console.error('Erreur du dossier de changement:', err);
+    res.status(500).type('html').send('Erreur serveur.');
+  }
+});
+
+/**
+ * Produit une lettre en PDF.
+ *
+ * Rien n'est conservé : le document porte le nom, l'adresse et le numéro
+ * d'assuré, et il se reconstruit à l'identique au téléchargement suivant.
+ */
+async function serveLetter(req: Request, res: Response, kind: LetterKind) {
+  const user = req.siteUser!;
+  const client = await Client.findOne({ uid: req.params.uid, userUid: user.uid });
+  if (!client) {
+    return res.status(404).redirect('/espace/changement');
+  }
+
+  // Le questionnaire conditionne l'accès : la garde est ici et pas seulement
+  // dans la page, sinon l'adresse de la lettre suffirait à la contourner.
+  if (!await hasAnsweredSurvey(user.uid)) {
+    const query = new URLSearchParams(req.query as Record<string, string>).toString();
+    return res.redirect(`/espace/souscription${query ? `?${query}` : ''}`);
+  }
+
+  const year = targetYear();
+  const contract = await Insurance.findOne({
+    userUid: user.uid, clientUid: client.uid, type: 'LAMAL', status: 'ACTIVE'
+  });
+
+  // La signature du titulaire vaut pour tout le foyer : c'est lui qui signe
+  // les courriers de ses enfants.
+  const holder = await accountHolder(user.uid);
+  let signature: Buffer | undefined;
+  if (holder) {
+    const stored = await retrieveDocument(holder.uid, 'SIGNATURE', `lettre ${kind}`)
+      .catch(() => null);
+    signature = stored?.content;
+  }
+
+  if (!signature) {
+    return res.redirect('/espace/signature');
+  }
+
+  // Destinataire : la caisse quittée pour la résiliation, la caisse retenue
+  // par la comparaison pour l'affiliation.
+  let recipient = contract?.provider;
+  let currentInsurerName = contract?.provider;
+  let franchise = contract?.franchise;
+  let tariffLabel: string | undefined;
+
+  if (kind === 'ENROLMENT') {
+    try {
+      const result = await optimiseLamal(await buildHouseholdContext(user.uid));
+      const individual = String(req.query.option || '') === 'individuel';
+      const plan = result?.individual?.plans.find((p) => p.ref === client.uid);
+
+      // La caisse retenue par l'assuré, transmise depuis la comparaison.
+      const pickedInsurer = Number.parseInt(String(req.query.caisse ?? ''), 10);
+      const pickedTariff = String(req.query.modele || '').trim();
+      const picked = Number.isFinite(pickedInsurer)
+        ? result?.offers.find((offer) => offer.insurerId === pickedInsurer &&
+            (!pickedTariff || offer.tariffCode === pickedTariff))
+        : undefined;
+
+      const target = picked || (individual && plan ? plan.best : result?.offers?.[0]);
+      if (target) {
+        recipient = target.insurer;
+        tariffLabel = modelLabel(target);
+      }
+    } catch {
+      // Sans comparaison, la lettre reste produite : l'assuré complétera le
+      // destinataire à la main plutôt que de repartir les mains vides.
+    }
+  }
+
+  // Adresse postale officielle de la caisse, publiée par l'OFSP dans la liste
+  // des assureurs admis. Sans elle, la lettre ne porte qu'un nom et l'assuré
+  // doit chercher l'adresse lui-même — pour un recommandé, c'est rédhibitoire.
+  const catalogueYear = (await activeYear())?.year;
+  const address = catalogueYear && recipient
+    ? await insurerAddressByName(catalogueYear, recipient)
+    : null;
+
+  try {
+    const input = {
+      kind,
+      client,
+      recipient: address || { name: recipient || 'Votre caisse maladie', lines: [] },
+      effectiveYear: year,
+      contract: contract || undefined,
+      currentInsurerName,
+      franchise,
+      tariffLabel,
+      employerAccidentCoverage: contract?.employerAccidentCoverage,
+      signature
+    };
+
+    const pdf = await renderLetter(input);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${letterFilename(input)}"`,
+      'Cache-Control': 'no-store, private'
+    }).send(pdf);
+  } catch (err) {
+    console.error('Erreur de génération de lettre:', err);
+    res.status(500).type('text/plain').send('La lettre n\'a pas pu être produite.');
+  }
+}
+
+router.get('/espace/changement/:uid/resiliation', (req, res) =>
+  serveLetter(req, res, 'CANCELLATION'));
+router.get('/espace/changement/:uid/affiliation', (req, res) =>
+  serveLetter(req, res, 'ENROLMENT'));
+
+
 router.get('/espace/souscription', async (req: Request, res: Response) => {
   const user = req.siteUser!;
   const context = await currentSavings(user.uid);
@@ -1678,6 +2043,11 @@ router.get('/espace/souscription', async (req: Request, res: Response) => {
     email: user.email,
     csrf: csrfToken(req),
     values: {},
+    picked: {
+      insurerId: String(req.query.caisse || '') || undefined,
+      tariffCode: String(req.query.modele || '') || undefined,
+      option: String(req.query.option || '') || undefined
+    },
     savings: context.savings,
     // Le choix fait dans les onglets prime sur la stratégie la plus avantageuse.
     strategy: String(req.query.option || '') === 'individuel'
@@ -1709,6 +2079,11 @@ router.post('/espace/souscription', async (req: Request, res: Response) => {
       email: user.email,
       csrf: csrfToken(req),
       values,
+      picked: {
+        insurerId: String(req.body.caisse || '') || undefined,
+        tariffCode: String(req.body.modele || '') || undefined,
+        option: String(req.body.option || '') || undefined
+      },
       savings: context.savings,
       strategy: values.strategy || context.strategy,
       error,
@@ -1740,10 +2115,19 @@ router.post('/espace/souscription', async (req: Request, res: Response) => {
       shownStrategy: values.strategy || undefined
     });
 
+    // Le choix de caisse fait sur la comparaison est reconduit : l'assuré
+    // revient exactement là où il en était, sans avoir à le refaire.
+    const forward = new URLSearchParams();
+    for (const key of ['caisse', 'modele', 'option']) {
+      const value = String(req.body[key] ?? req.query[key] ?? '').trim();
+      if (value) { forward.set(key, value); }
+    }
+
     res.type('html').send(views.renderSubscriptionThanks({
       email: user.email,
       betaTester: values.betaTester,
-      recontact: values.recontact
+      recontact: values.recontact,
+      changeHref: '/espace/changement' + (forward.toString() ? '?' + forward.toString() : '')
     }));
   } catch (err) {
     console.error('Erreur d\'enregistrement du retour d\'expérience:', err);

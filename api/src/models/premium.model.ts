@@ -180,15 +180,41 @@ export const PremiumRegion = model<IPremiumRegion>('PremiumRegion', premiumRegio
 export interface IPremiumInsurer extends Document {
   year: number;
   insurerId: number;
+  /** Nom court, celui des tableaux de primes : « CSS », « Assura-Basis SA ». */
   name: string;
+  /** « 6002 Luzern », tel que l'index du fichier officiel l'écrit. */
   locality?: string;
+
+  /**
+   * Raison sociale et adresse postale, tirées de la feuille « Assureurs
+   * admis » du même fichier. Elles servent à adresser les courriers de
+   * résiliation et d'affiliation : un recommandé au seul nom « CSS » n'arrive
+   * pas, et le nom court n'est pas celui du siège.
+   */
+  legalName?: string;
+  street?: string;
+  /** Case postale, quand la caisse en indique une : elle prime sur la rue. */
+  poBox?: string;
+  plz?: string;
+  city?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
 }
 
 const premiumInsurerSchema = new Schema<IPremiumInsurer>({
   year: { type: Number, required: true },
   insurerId: { type: Number, required: true },
   name: { type: String, required: true },
-  locality: { type: String }
+  locality: { type: String },
+  legalName: { type: String },
+  street: { type: String },
+  poBox: { type: String },
+  plz: { type: String },
+  city: { type: String },
+  phone: { type: String },
+  email: { type: String },
+  website: { type: String }
 }, {
   collection: 'md_premium_insurer',
   timestamps: false,

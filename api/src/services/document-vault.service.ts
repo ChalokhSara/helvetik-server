@@ -7,7 +7,7 @@ import {
   timingSafeEqual
 } from 'crypto';
 import {
-  DocumentSide,
+  DocumentKind,
   IIdentityDocument,
   IdentityDocument
 } from '../models/identity-document.model';
@@ -112,8 +112,45 @@ export function checkVaultConfiguration(): void {
   }
 }
 
+/**
+ * Aligne les index du coffre sur le schéma courant.
+ *
+ * Le coffre n'a d'abord connu que les deux faces d'une pièce d'identité, d'où
+ * un index unique sur `clientUid + side`. La signature l'a fait évoluer vers
+ * `clientUid + kind`, mais l'ancien index survit dans les bases déjà en
+ * service : tous les documents y valent désormais `side: null`, si bien que le
+ * **second** dépôt d'un même assuré était rejeté pour doublon.
+ *
+ * `syncIndexes` supprime les index absents du schéma et crée les manquants.
+ * La collection reste petite — quelques documents par compte — l'opération est
+ * donc sans effet perceptible au démarrage.
+ */
+export async function ensureVaultIndexes(): Promise<void> {
+  try {
+    // Les documents déposés avant la signature portent `side` et pas `kind` :
+    // les renommer d'abord, sinon le nouvel index les verrait tous à
+    // `kind: null` et refuserait de se construire.
+    const legacy = await IdentityDocument.collection.updateMany(
+      { kind: { $exists: false }, side: { $exists: true } },
+      [{ $set: { kind: '$side' } }, { $unset: 'side' }]
+    );
+    if (legacy.modifiedCount) {
+      console.info(
+        `[coffre] ${legacy.modifiedCount} document(s) repris de l'ancien schéma (side → kind).`
+      );
+    }
+
+    const dropped = await IdentityDocument.syncIndexes();
+    if (dropped.length) {
+      console.info(`[coffre] index obsolètes supprimés : ${dropped.join(', ')}.`);
+    }
+  } catch (err) {
+    console.error('[coffre] les index n\'ont pas pu être alignés:', (err as Error).message);
+  }
+}
+
 export interface StoredDocument {
-  side: DocumentSide;
+  kind: DocumentKind;
   filename: string;
   mimetype: string;
   size: number;
@@ -142,7 +179,7 @@ export function isAcceptedDocument(mimetype: string, filename: string): boolean 
 export async function storeDocument(options: {
   userUid: string;
   clientUid: string;
-  side: DocumentSide;
+  kind: DocumentKind;
   path: string;
   filename: string;
   mimetype: string;
@@ -165,11 +202,11 @@ export async function storeDocument(options: {
 
   const previous = await IdentityDocument.findOne({
     clientUid: options.clientUid,
-    side: options.side
+    kind: options.kind
   });
 
   await IdentityDocument.findOneAndUpdate(
-    { clientUid: options.clientUid, side: options.side },
+    { clientUid: options.clientUid, kind: options.kind },
     {
       $set: {
         userUid: options.userUid,
@@ -191,7 +228,7 @@ export async function storeDocument(options: {
   );
 
   return {
-    side: options.side,
+    kind: options.kind,
     filename: options.filename,
     mimetype: options.mimetype,
     size: plain.length,
@@ -215,11 +252,11 @@ export interface RetrievedDocument {
  */
 export async function retrieveDocument(
   clientUid: string,
-  side: DocumentSide,
+  kind: DocumentKind,
   reason: string
 ): Promise<RetrievedDocument | null> {
   const document = await IdentityDocument
-    .findOne({ clientUid, side })
+    .findOne({ clientUid, kind })
     .select('+data +iv +authTag');
 
   if (!document) {
@@ -253,7 +290,7 @@ export async function retrieveDocument(
     { uid: document.uid },
     { $set: { lastAccessedAt: new Date() }, $inc: { accessCount: 1 } }
   );
-  console.info(`[coffre] pièce ${side} de ${clientUid} restituée — ${reason}`);
+  console.info(`[coffre] document ${kind} de ${clientUid} restitué — ${reason}`);
 
   return {
     content,
@@ -264,7 +301,12 @@ export async function retrieveDocument(
 
 /** Métadonnées des pièces d'un assuré, sans jamais toucher au contenu. */
 export async function listDocuments(clientUid: string): Promise<IIdentityDocument[]> {
-  return IdentityDocument.find({ clientUid }).sort({ side: 1 });
+  return IdentityDocument.find({ clientUid }).sort({ kind: 1 });
+}
+
+/** Le document de cette nature a-t-il déjà été déposé ? */
+export async function hasDocument(clientUid: string, kind: DocumentKind): Promise<boolean> {
+  return Boolean(await IdentityDocument.exists({ clientUid, kind }));
 }
 
 /** Assurés d'un foyer possédant au moins une pièce, par uid. */
@@ -281,7 +323,7 @@ export async function documentsByClient(
   return byClient;
 }
 
-export async function deleteDocument(clientUid: string, side: DocumentSide): Promise<boolean> {
-  const result = await IdentityDocument.deleteOne({ clientUid, side });
+export async function deleteDocument(clientUid: string, kind: DocumentKind): Promise<boolean> {
+  const result = await IdentityDocument.deleteOne({ clientUid, kind });
   return result.deletedCount > 0;
 }

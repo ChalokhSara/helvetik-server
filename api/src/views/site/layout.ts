@@ -138,6 +138,28 @@ const STYLES = `
     background: var(--bg); border: 1px dashed var(--line); border-radius: 8px;
     font-weight: 700;
   }
+  /* --- signature manuscrite --- */
+  .sigpad {
+    position: relative;
+    border: 2px dashed var(--line); border-radius: 10px;
+    background: #fff;
+    margin-bottom: .75rem;
+    /* touch-action: le navigateur ne doit pas défiler pendant qu'on signe. */
+    touch-action: none;
+  }
+  .sigpad canvas { display: block; width: 100%; height: auto; border-radius: 8px; cursor: crosshair; }
+  .sig-hint {
+    position: absolute; inset: 0; margin: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #9ca3af; font-size: 1.1rem; pointer-events: none;
+  }
+  .sig-hint[hidden] { display: none; }
+  /* Le trait est noir : le cadre reste blanc même en thème sombre. */
+  .sig-preview {
+    max-width: 320px; width: 100%; background: #fff;
+    border: 1px solid var(--line); border-radius: 8px; padding: .5rem;
+  }
+
   /* --- propositions d'adresses --- */
   /* La liste flotte au-dessus du formulaire : elle ne doit pas déplacer les
      champs suivants à chaque frappe. */
@@ -286,6 +308,27 @@ const STYLES = `
   .offer .delta.same { color: var(--muted); font-weight: 600; }
   .offer .price { font-size: 1.05rem; font-weight: 600; white-space: nowrap; }
   .offer .price small { font-weight: 400; color: var(--muted); }
+  /* Bouton de choix : discret dans la liste, mais toujours atteignable au
+     pouce — 44 px de haut, la cible minimale sur téléphone. */
+  .offer .pick {
+    display: inline-flex; align-items: center; min-height: 44px;
+    padding: .4rem .9rem; margin-top: .5rem;
+    border: 1px solid var(--brand); border-radius: 8px;
+    color: var(--brand); background: transparent;
+    font-size: .9rem; font-weight: 600; text-decoration: none;
+  }
+  .offer .pick:hover { background: var(--brand); color: #fff; }
+
+  /* Raccourci vers la meilleure offre, posé au-dessus de la liste : c'est le
+     geste que l'on veut rendre le plus court. */
+  .quick-pick {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem;
+    padding: 1rem; margin-bottom: 1rem;
+    background: var(--ok-bg); border-radius: 10px;
+  }
+  .quick-pick .sum { flex: 1 1 14rem; }
+  .quick-pick .sum strong { font-size: 1.05rem; }
+  .quick-pick .btn { flex: 0 0 auto; }
   @media (prefers-color-scheme: dark) {
     .offer .delta.gain { color: #4ade80; }
     .offer .delta.loss { color: #f87171; }

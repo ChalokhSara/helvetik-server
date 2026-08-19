@@ -221,6 +221,51 @@ export async function premiumsByTariff(
   }]));
 }
 
+/**
+ * Adresse postale d'une caisse, prête à être imprimée sur une enveloppe.
+ *
+ * La raison sociale prime sur le nom court : un recommandé adressé à « CSS »
+ * n'a pas de destinataire, « CSS Assurance-maladie SA » en a un. La case
+ * postale, quand elle existe, remplace la rue — c'est l'adresse que la caisse
+ * publie elle-même pour son courrier.
+ */
+export interface InsurerMailingAddress {
+  name: string;
+  lines: string[];
+}
+
+export async function insurerAddress(
+  year: number,
+  insurerId: number
+): Promise<InsurerMailingAddress | null> {
+  const insurer = await PremiumInsurer.findOne({ year, insurerId });
+  if (!insurer) {
+    return null;
+  }
+
+  const city = [insurer.plz, insurer.city].filter(Boolean).join(' ').trim();
+  const lines = [insurer.poBox || insurer.street, city].filter(Boolean) as string[];
+
+  return { name: insurer.legalName || insurer.name, lines };
+}
+
+/** Même adresse, recherchée par le nom affiché du catalogue. */
+export async function insurerAddressByName(
+  year: number,
+  name: string
+): Promise<InsurerMailingAddress | null> {
+  const key = (value: string) => value.normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]/g, '');
+  const wanted = key(name);
+
+  const insurers = await PremiumInsurer.find({ year });
+  const match = insurers.find((i) => key(i.name) === wanted)
+    || insurers.find((i) => i.legalName && key(i.legalName) === wanted)
+    || insurers.find((i) => key(i.name).startsWith(wanted) && wanted.length >= 3);
+
+  return match ? insurerAddress(year, match.insurerId) : null;
+}
+
 /** Franchises légales proposées à un assuré, selon son âge. */
 export function franchisesForAge(age: number): number[] {
   return age < 19

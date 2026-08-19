@@ -9,7 +9,7 @@ import { specs } from './config/swagger';
 import { ensureSuperAdmin } from './config/seed';
 import { startScheduler } from './config/scheduler';
 import { emailConfirmationRequired, loadSettings, startSettingsRefresh } from './config/features';
-import { checkVaultConfiguration } from './services/document-vault.service';
+import { checkVaultConfiguration, ensureVaultIndexes } from './services/document-vault.service';
 import { checkLlmAvailability } from './services/policy-llm.service';
 import { authRouter } from './routes/auth.routes';
 import { clientsRouter } from './routes/clients.routes';
@@ -91,6 +91,7 @@ mongoose.connect(MONGODB_URI)
   .then(async () => {
     console.log('Connecté à MongoDB');
     await ensureSuperAdmin();
+    await ensureVaultIndexes();
     // Les réglages vivent en base : les charger avant de servir la première requête.
     await loadSettings();
     startSettingsRefresh();

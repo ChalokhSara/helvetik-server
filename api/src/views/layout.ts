@@ -173,6 +173,39 @@ const CONSOLE_STYLES = `${BASE_STYLES}
     }
     .badge.ok { background: #dcfce7; color: #166534; }
     .badge.blocked { background: #fee2e2; color: #991b1b; }
+    /* --- synthèse et retours des assurés --- */
+    .stats { display: flex; flex-wrap: wrap; gap: .75rem; margin-bottom: .75rem; }
+    .stats .stat {
+      flex: 1 1 9rem; padding: .9rem 1rem;
+      background: #fff; border-radius: 8px; border: 1px solid #e5e7eb;
+    }
+    .stats .stat .value { display: block; font-size: 1.6rem; font-weight: 700; line-height: 1.1; }
+    .stats .stat .label { display: block; font-size: .8rem; color: #6b7280; margin-top: .2rem; }
+
+    .feedback-list { display: flex; flex-direction: column; gap: .75rem; }
+    .feedback {
+      padding: 1rem 1.1rem;
+      background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+    }
+    .feedback header {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 1rem; font-size: .9rem;
+    }
+    .feedback .rating { color: #d97706; white-space: nowrap; }
+    .feedback .who { margin: .4rem 0 0; font-size: .9rem; }
+    .feedback .meta { margin: .5rem 0 0; font-size: .85rem; color: #374151; }
+    /* Les commentaires libres sont la matière utile : ils gardent leurs
+       retours à la ligne et ne sont jamais tronqués. */
+    .feedback blockquote {
+      margin: .75rem 0 0; padding: .7rem .9rem;
+      background: #f9fafb; border-left: 3px solid #d1d5db; border-radius: 0 6px 6px 0;
+      white-space: pre-wrap; overflow-wrap: anywhere; font-size: .92rem;
+    }
+    .feedback blockquote .label {
+      display: block; font-size: .72rem; text-transform: uppercase;
+      letter-spacing: .04em; color: #6b7280; margin-bottom: .25rem;
+    }
+
     .empty { padding: 2.5rem; text-align: center; color: #6b7280; background: #fff; border-radius: 8px; }
     .muted { color: #6b7280; font-size: .85rem; }
     .pagination { display: flex; gap: .75rem; align-items: center; margin-top: 1rem; font-size: .85rem; }
@@ -202,6 +235,9 @@ const CONSOLE_STYLES = `${BASE_STYLES}
       .badge.blocked { background: #2a1416; color: #fca5a5; }
       .empty, .muted, .pagination { color: #9ca3af; }
       .empty { background: #1c1f26; }
+      .stats .stat, .feedback { background: #1c1f26; border-color: #2c313a; }
+      .feedback .meta { color: #d1d5db; }
+      .feedback blockquote { background: #23272f; border-left-color: #3a4049; }
       fieldset { border-color: #2a2f3a; }
       table, .panel { box-shadow: none; }
     }
@@ -240,7 +276,7 @@ ${body}
 export interface ConsoleContext {
   username: string;
   /** Onglet de navigation à marquer actif. */
-  active?: 'dashboard' | 'users' | 'clients' | 'insurances' | 'premiums' | 'settings';
+  active?: 'dashboard' | 'users' | 'clients' | 'insurances' | 'premiums' | 'feedback' | 'settings';
 }
 
 /**
@@ -271,6 +307,7 @@ export function consolePage(title: string, ctx: ConsoleContext, body: string): s
     ${tab('/admin/clients', 'Clients', 'clients')}
     ${tab('/admin/insurances', 'Assurances', 'insurances')}
     ${tab('/admin/premiums', 'Primes officielles', 'premiums')}
+    ${tab('/admin/feedback', 'Retours', 'feedback')}
     ${tab('/admin/settings', 'Réglages', 'settings')}
   </nav>
   <main>
