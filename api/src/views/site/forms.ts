@@ -289,8 +289,8 @@ function cameraScript(prefix: string, inputId: string, formId: string): string {
 /**
  * Dépôt d'un document pour pré-remplir le formulaire, sans conservation.
  *
- * `capture="environment"` ouvre directement l'appareil photo arrière sur
- * mobile, tout en laissant le choix d'un fichier existant sur ordinateur.
+ * Pas d'attribut `capture` : sur mobile, il interdirait de choisir un scan
+ * ou un PDF existant. Le sélecteur natif propose déjà l'appareil photo.
  */
 export function importBlock(options: { action: string; csrf: string; hint: string }): string {
   return `    <details class="card" style="margin-bottom:1rem">
@@ -308,7 +308,7 @@ ${cameraMarkup('cam', 'Prendre une photo')}
              L'absence de fichier est signalée par le serveur. -->
         <label for="document">Ou choisir un fichier</label>
         <input id="document" name="document" type="file"
-               accept="image/*,application/pdf" capture="environment">
+               accept="image/*,application/pdf">
 
         <div class="actions">
           <button type="submit">Analyser le document</button>
@@ -357,7 +357,7 @@ export function signaturePad(options: { action: string; csrf: string }): string 
         <summary style="cursor:pointer">Ou déposer une photo de ma signature</summary>
         <p class="muted">Signez sur une feuille blanche, photographiez-la bien à plat.
         Le fond blanc est retiré automatiquement.</p>
-        <input id="sig-file" name="signature" type="file" accept="image/*" capture="environment">
+        <input id="sig-file" name="signature" type="file" accept="image/*">
       </details>
 
       <div class="actions">
@@ -449,6 +449,7 @@ export function signaturePad(options: { action: string; csrf: string }): string 
           // L'envoi attend la conversion : elle est asynchrone, on relance
           // donc la soumission une fois le fichier en place.
           event.preventDefault();
+          if (window.helvetikBusy) { window.helvetikBusy(form, event.submitter); }
           canvas.toBlob(function (blob) {
             if (!blob) { form.submit(); return; }
             var data = new DataTransfer();
@@ -477,9 +478,12 @@ export interface StoredSide {
  * l'identité, le verso la bande lisible par machine et la validité. Une seule
  * face rendrait le dossier irrecevable.
  *
- * Chaque face est déposée séparément : sur un téléphone, on photographie
- * rarement les deux d'affilée sans se tromper, et devoir tout recommencer
- * parce que la seconde est floue serait décourageant.
+ * Les deux faces partent dans un seul envoi, chacune restant facultative :
+ * on peut déposer les deux d'un coup, ou en remplacer une seule plus tard.
+ *
+ * Pas d'attribut `capture` : sur mobile, il ouvre directement l'appareil
+ * photo et interdit de choisir un fichier existant — un scan, typiquement.
+ * Sans lui, le sélecteur natif propose appareil photo, galerie et fichiers.
  */
 export function identityUploadBlock(options: {
   action: string;
@@ -491,48 +495,113 @@ export function identityUploadBlock(options: {
 }): string {
   const byside = new Map(options.stored.map((s) => [s.side, s]));
 
-  const face = (side: 'RECTO' | 'VERSO', title: string, hint: string) => {
-    const prefix = side.toLowerCase();
+  const status = (side: 'RECTO' | 'VERSO', title: string) => {
     const existing = byside.get(side);
-
-    const state = existing
-      ? `        <p class="msg ok">Enregistré le ${formatDate(existing.uploadedAt)}
-        — ${escapeHtml(existing.filename)} (${Math.round(existing.size / 1024)} Ko).</p>
-        <div class="actions" style="margin-bottom:.75rem">
-          <a class="btn btn-ghost" href="${options.viewPath(side)}" target="_blank" rel="noopener">Voir</a>
-          <form method="post" action="${options.deletePath(side)}" style="display:inline"
-                onsubmit="return confirm('Supprimer définitivement le ${escapeHtml(title.toLowerCase())} ?')">
-            <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
-            <button type="submit" class="btn-danger">Supprimer</button>
-          </form>
-        </div>
-        <p class="muted">Déposer un nouveau fichier remplacera celui-ci.</p>`
-      : `        <p class="msg warn">Pas encore déposé.</p>`;
-
-    return `      <div class="card">
-        <h2>${escapeHtml(title)}</h2>
-        <p class="muted">${escapeHtml(hint)}</p>
-${state}
-        <form method="post" action="${options.action}" enctype="multipart/form-data"
-              id="${prefix}-form" class="side-form">
-          <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
-          <input type="hidden" name="side" value="${side}">
-${cameraMarkup(prefix, 'Photographier')}
-          <label for="${prefix}-file">Ou choisir un fichier</label>
-          <input id="${prefix}-file" name="document" type="file"
-                 accept="image/*,application/pdf" capture="environment">
-          <div class="actions">
-            <button type="submit">${existing ? 'Remplacer' : 'Enregistrer'} le ${escapeHtml(title.toLowerCase())}</button>
-          </div>
-        </form>
-${cameraScript(prefix, `${prefix}-file`, `${prefix}-form`)}
-      </div>`;
+    if (!existing) {
+      return `        <div class="face-status">
+          <span><strong>${title}</strong> — pas encore déposé</span>
+        </div>`;
+    }
+    return `        <div class="face-status ok">
+          <span><strong>${title}</strong> — ${escapeHtml(existing.filename)}
+          (${Math.round(existing.size / 1024)} Ko, ${formatDate(existing.uploadedAt)})</span>
+          <span class="face-actions">
+            <a class="btn btn-ghost" href="${options.viewPath(side)}" target="_blank" rel="noopener">Voir</a>
+            <form method="post" action="${options.deletePath(side)}"
+                  data-confirm="Supprimer définitivement le ${title.toLowerCase()} ?">
+              <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
+              <button type="submit" class="btn-danger">Supprimer</button>
+            </form>
+          </span>
+        </div>`;
   };
 
-  return `    <div class="stats">
-${face('RECTO', 'Recto', 'La face avec la photographie, le nom et la date de naissance.')}
-${face('VERSO', 'Verso', 'La face avec les lignes de caractères en majuscules : c\'est celle qui est lue automatiquement.')}
+  const field = (side: 'RECTO' | 'VERSO', title: string) => {
+    const name = side.toLowerCase();
+    return `          <label for="${name}-file">${title}${byside.has(side) ? ' (remplacera l\'actuel)' : ''}</label>
+          <input id="${name}-file" name="${name}" type="file" accept="image/*,application/pdf">`;
+  };
+
+  return `    <div class="card">
+${status('RECTO', 'Recto')}
+${status('VERSO', 'Verso')}
+      <form method="post" action="${options.action}" enctype="multipart/form-data"
+            id="identity-upload" style="margin-top:1rem">
+        <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
+${field('RECTO', 'Recto')}
+${field('VERSO', 'Verso')}
+        <p class="muted" id="identity-upload-status"></p>
+        <div class="actions">
+          <button type="submit">Enregistrer</button>
+        </div>
+      </form>
+${downscaleScript('identity-upload', 'identity-upload-status')}
     </div>`;
+}
+
+/**
+ * Réduit avant l'envoi les photos trop lourdes (scans en haute résolution) :
+ * au-delà de 3 Mo, l'image est ramenée à 2400 px de côté et réencodée en
+ * JPEG, ce qui reste largement lisible pour la reconnaissance de texte et
+ * pour une annexe de lettre. Les PDF et les formats que le navigateur ne
+ * sait pas décoder partent tels quels ; le serveur tranche alors.
+ */
+function downscaleScript(formId: string, statusId: string): string {
+  return `      <script>
+        (function () {
+          var form = document.getElementById('${formId}');
+          var status = document.getElementById('${statusId}');
+          if (!form || typeof DataTransfer === 'undefined' || !window.createImageBitmap) { return; }
+          var LIMIT = 3 * 1024 * 1024, MAX_SIDE = 2400;
+
+          function shrink(file) {
+            if (!/^image\\/(jpeg|png|webp)$/i.test(file.type) || file.size <= LIMIT) {
+              return Promise.resolve(file);
+            }
+            return createImageBitmap(file).then(function (bitmap) {
+              var scale = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height));
+              var canvas = document.createElement('canvas');
+              canvas.width = Math.round(bitmap.width * scale);
+              canvas.height = Math.round(bitmap.height * scale);
+              var ctx = canvas.getContext('2d');
+              ctx.fillStyle = '#fff';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+              return new Promise(function (resolve) {
+                canvas.toBlob(function (blob) {
+                  resolve(blob ? new File([blob], file.name.replace(/\\.\\w+$/, '') + '.jpg', { type: 'image/jpeg' }) : file);
+                }, 'image/jpeg', 0.9);
+              });
+            }).catch(function () { return file; });
+          }
+
+          var ready = false;
+          form.addEventListener('submit', function (event) {
+            if (ready) { return; }
+            var inputs = Array.prototype.filter.call(form.querySelectorAll('input[type=file]'),
+              function (input) { return input.files && input.files.length; });
+            if (!inputs.length) {
+              event.preventDefault();
+              status.textContent = 'Choisissez au moins une face à déposer.';
+              return;
+            }
+            event.preventDefault();
+            if (window.helvetikBusy) { window.helvetikBusy(form, event.submitter); }
+            status.textContent = 'Préparation des fichiers…';
+            Promise.all(inputs.map(function (input) {
+              return shrink(input.files[0]).then(function (file) {
+                var data = new DataTransfer();
+                data.items.add(file);
+                input.files = data.files;
+              });
+            })).then(function () {
+              ready = true;
+              status.textContent = 'Envoi en cours…';
+              form.submit();
+            });
+          });
+        })();
+      </script>`;
 }
 
 export function text(
@@ -540,11 +609,13 @@ export function text(
   name: string,
   label: string,
   attrs = '',
-  required = true
+  required = true,
+  hint?: string
 ): string {
   return `      <div>
         <label for="${name}">${escapeHtml(label)}</label>
         <input id="${name}" name="${name}" value="${escapeHtml(String(values[name] ?? ''))}" ${attrs}${required ? ' required' : ''}>
+        ${hint ? `<p class="field-hint">${escapeHtml(hint)}</p>` : ''}
       </div>`;
 }
 
@@ -709,7 +780,10 @@ function sameAsHousehold(values: Values, address: HouseholdAddress): boolean {
  * serveur complète tout de même le canton depuis le NPA.
  */
 export function addressFields(values: Values): string {
-  return `      <div class="suggest">
+  return `      <p class="muted">Commencez à taper votre rue : les adresses suisses vous sont proposées.
+      Le NPA détermine votre région de primes, il doit être exact. Le canton en découle :
+      inutile de le choisir.</p>
+      <div class="suggest">
 ${text(values, 'road', 'Rue et numéro',
     'type="text" autocomplete="street-address" placeholder="Avenue de France 1" ' +
     'role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="road-list"')}
@@ -721,9 +795,6 @@ ${text(values, 'location', 'Localité', 'type="text" autocomplete="address-level
 ${select(values, 'canton', 'Canton', CANTONS.map((c) => [c, c] as [string, string]),
     { placeholder: '— déduit du NPA —', required: false })}
       </div>
-      <p class="muted">Commencez à taper votre rue : les adresses suisses vous sont proposées.
-      Le NPA détermine votre région de primes, il doit être exact. Le canton en découle :
-      inutile de le choisir.</p>
 ${addressScript()}`;
 }
 
@@ -893,9 +964,9 @@ ${text(values, 'name', 'Nom', 'type="text" autocomplete="family-name"', false)}
 ${text(values, 'birthdate', 'Date de naissance', 'type="date" max="9999-12-31"', false)}
 ${select(values, 'sexe', 'Sexe', SEXES, { placeholder: '— Choisir —', required: false })}
 ${text(values, 'nationality', 'Nationalité', 'type="text" placeholder="CH"', false)}
-${text(values, 'avsNum', 'N° AVS', 'type="text" inputmode="numeric" placeholder="756.1234.5678.90" pattern="756\\.\\d{4}\\.\\d{4}\\.\\d{2}"')}
+${text(values, 'avsNum', 'N° AVS', 'type="text" inputmode="numeric" placeholder="756.1234.5678.90" pattern="756\\.\\d{4}\\.\\d{4}\\.\\d{2}"',
+    true, 'Le numéro AVS figure sur votre carte d\'assurance, au format 756.XXXX.XXXX.XX.')}
       </div>
-      <p class="muted">Le numéro AVS figure sur votre carte d'assurance, au format 756.XXXX.XXXX.XX.</p>
     </fieldset>
 
     <fieldset>
@@ -914,26 +985,24 @@ ${address ? sameAddressScript() : ''}
 /**
  * Champs de l'inscription, réduits au strict nécessaire.
  *
- * Quatre informations suffisent à ouvrir un compte : de quoi vous joindre
- * (email, téléphone), où vous habitez (l'adresse, qui fixe la région de
- * primes) et votre numéro AVS. Le nom, le prénom et la date de naissance
- * viennent ensuite, lus sur une pièce d'identité en une photo.
+ * De quoi vous joindre (email, téléphone) et où vous habitez (l'adresse,
+ * qui fixe la région de primes) suffisent à ouvrir un compte. Le nom, le
+ * prénom et la date de naissance viennent ensuite, lus sur une pièce
+ * d'identité en une photo ; le numéro AVS n'est redemandé qu'à la
+ * souscription d'une police, là où il sert réellement.
  *
  * Chaque champ demandé de plus est un compte qui ne se crée pas : c'est la
  * raison d'être de ce formulaire séparé d'`insuredFields`.
  */
 export function accountFields(values: Values): string {
   return `    <fieldset>
-      <legend>Vous joindre</legend>
+      <legend>À propos de vous</legend>
       <div class="grid">
 ${text(values, 'accountEmail', 'Email', 'type="email" autocomplete="email" autofocus')}
-${text(values, 'password', 'Mot de passe', 'type="password" autocomplete="new-password" minlength="8"')}
+${text(values, 'password', 'Mot de passe', 'type="password" autocomplete="new-password" minlength="8"',
+    true, 'Huit caractères au minimum.')}
 ${text(values, 'phone', 'Téléphone', 'type="tel" autocomplete="tel" placeholder="+41 79 123 45 67"')}
-${text(values, 'avsNum', 'N° AVS',
-    'type="text" inputmode="numeric" placeholder="756.1234.5678.90" pattern="756\\.\\d{4}\\.\\d{4}\\.\\d{2}"')}
       </div>
-      <p class="muted">Mot de passe : huit caractères au minimum. Le numéro AVS figure sur
-      votre carte d'assurance, au format 756.XXXX.XXXX.XX.</p>
     </fieldset>
 
     <fieldset>

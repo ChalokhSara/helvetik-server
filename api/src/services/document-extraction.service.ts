@@ -61,31 +61,302 @@ export interface ExtractionResult {
   warnings: string[];
 }
 
-/** Texte d'un PDF : exact, sans reconnaissance de caractères. */
-async function readPdf(path: string): Promise<string> {
+/** Pages d'un PDF scanné soumises à la reconnaissance : une pièce ou une police tient en deux. */
+const SCANNED_PDF_PAGES = 2;
+
+/** Taille visée pour le plus grand côté d'une image avant reconnaissance. */
+const OCR_TARGET_SIDE = 2400;
+
+/** En dessous, la lecture est jugée douteuse et les autres orientations sont essayées. */
+const OCR_CONFIDENCE_OK = 60;
+
+const MRZ_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<';
+
+/** Ce que la reconnaissance a tiré d'un document. */
+interface DocumentText {
+  text: string;
+  /** Texte d'une passe réservée à la bande MRZ, quand elle a abouti. */
+  mrzText?: string;
+}
+
+/**
+ * Texte d'un document. Un PDF à couche texte est lu tel quel ; un PDF issu
+ * d'un scanner, qui ne contient que des images, et une photo passent par la
+ * reconnaissance optique.
+ */
+async function readDocument(path: string, isPdf: boolean): Promise<DocumentText> {
+  if (!isPdf) {
+    return readImages([await readFile(path)]);
+  }
+
   const { PDFParse } = await import('pdf-parse');
   const parser = new PDFParse({ data: await readFile(path) });
   try {
-    const result = await parser.getText();
-    return String(result.text || '');
+    const text = String((await parser.getText()).text || '');
+    if (text.replace(/\s+/g, '').length >= 20) {
+      return { text };
+    }
+    // Rendu large : une carte scannée sur une page A4 n'en occupe qu'une partie.
+    const shots = await parser.getScreenshot({
+      first: SCANNED_PDF_PAGES,
+      desiredWidth: 3000,
+      imageBuffer: true,
+      imageDataUrl: false
+    });
+    return await readImages(shots.pages.map((page) => Buffer.from(page.data)));
   } finally {
     await parser.destroy();
   }
 }
 
-/** Texte d'une image, par reconnaissance optique. */
-async function readImage(path: string): Promise<string> {
+type Canvas = import('@napi-rs/canvas').Canvas;
+
+/**
+ * Image préparée pour la reconnaissance, en deux versions, ou `null` si elle
+ * ne peut pas être décodée ici (HEIC, notamment) : elle part alors brute.
+ *
+ * - `ink` : les pièces d'identité sont imprimées sur des fonds de sécurité
+ *   colorés (guillochis) qui noient le texte. Garder, pour chaque pixel, la
+ *   plus claire de ses trois composantes efface ces encres colorées et laisse
+ *   intact le texte noir — dont la bande MRZ.
+ * - `luma` : niveaux de gris ordinaires, qui conservent le texte imprimé en
+ *   couleur (nom de caisse, titres) que la première version effacerait.
+ *
+ * Un scan pose souvent une petite carte au coin d'une page A4 blanche :
+ * l'image est d'abord recadrée sur ce qui n'est pas du papier blanc, faute de
+ * quoi la mise à l'échelle réduirait le texte jusqu'à le rendre illisible.
+ */
+async function prepareImage(source: Buffer): Promise<{ ink: Canvas; luma: Canvas } | null> {
+  const { createCanvas, loadImage } = await import('@napi-rs/canvas');
+  let image;
+  try {
+    image = await loadImage(source);
+  } catch {
+    return null;
+  }
+
+  // Pleine résolution, plafonnée pour ne pas épuiser la mémoire.
+  const cap = Math.min(1, 5000 / Math.max(image.width, image.height));
+  const full = createCanvas(Math.round(image.width * cap), Math.round(image.height * cap));
+  const fullCtx = full.getContext('2d');
+  fullCtx.fillStyle = '#fff';
+  fullCtx.fillRect(0, 0, full.width, full.height);
+  fullCtx.drawImage(image, 0, 0, full.width, full.height);
+  const crop = inkBounds(fullCtx.getImageData(0, 0, full.width, full.height));
+
+  const longest = Math.max(crop.width, crop.height);
+  const scale = Math.min(3, Math.max(0.4, OCR_TARGET_SIDE / longest));
+  const scaled = () => {
+    const canvas = createCanvas(Math.round(crop.width * scale), Math.round(crop.height * scale));
+    canvas.getContext('2d')
+      .drawImage(full, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  };
+
+  return {
+    ink: toGray(scaled(), (r, g, b) => Math.max(r, g, b)),
+    luma: toGray(scaled(), (r, g, b) => Math.round(0.299 * r + 0.587 * g + 0.114 * b))
+  };
+}
+
+/** Niveaux de gris selon `measure`, puis étirement du contraste. */
+function toGray(canvas: Canvas, measure: (r: number, g: number, b: number) => number): Canvas {
+  const ctx = canvas.getContext('2d');
+  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = pixels.data;
+  const histogram = new Array(256).fill(0);
+  for (let i = 0; i < data.length; i += 4) {
+    const value = measure(data[i], data[i + 1], data[i + 2]);
+    data[i] = value;
+    histogram[value]++;
+  }
+
+  // Étirement entre le 1er et le 99e centile : un reflet ou une ombre ne
+  // doivent pas fixer à eux seuls le blanc et le noir de toute l'image.
+  const total = data.length / 4;
+  let low = 0;
+  let high = 255;
+  for (let v = 0, seen = 0; v < 256; v++) {
+    seen += histogram[v];
+    if (seen >= total * 0.01) { low = v; break; }
+  }
+  for (let v = 255, seen = 0; v >= 0; v--) {
+    seen += histogram[v];
+    if (seen >= total * 0.01) { high = v; break; }
+  }
+  const range = Math.max(1, high - low);
+  for (let i = 0; i < data.length; i += 4) {
+    const value = Math.min(255, Math.max(0, Math.round((data[i] - low) * 255 / range)));
+    data[i] = data[i + 1] = data[i + 2] = value;
+  }
+  ctx.putImageData(pixels, 0, 0);
+  return canvas;
+}
+
+/**
+ * Rectangle qui englobe tout ce qui n'est pas du papier blanc (texte sombre
+ * comme texte ou aplats colorés), avec une marge. Une ligne ou une colonne
+ * ne compte que si elle en porte assez : une poussière sur la vitre du
+ * scanner ne doit pas étendre le cadre. Sans zone nette, l'image entière est
+ * gardée.
+ */
+function inkBounds(pixels: { data: Uint8ClampedArray; width: number; height: number }) {
+  const { data, width, height } = pixels;
+  const rows = new Uint32Array(height);
+  const cols = new Uint32Array(width);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (Math.min(data[i], data[i + 1], data[i + 2]) < 160) {
+        rows[y]++;
+        cols[x]++;
+      }
+    }
+  }
+
+  const span = (counts: Uint32Array, minimum: number) => {
+    let first = -1;
+    let last = -1;
+    counts.forEach((count, index) => {
+      if (count >= minimum) {
+        if (first < 0) { first = index; }
+        last = index;
+      }
+    });
+    return first < 0 ? null : { first, last };
+  };
+  const ys = span(rows, Math.max(3, width * 0.004));
+  const xs = span(cols, Math.max(3, height * 0.004));
+  const whole = { x: 0, y: 0, width, height };
+  if (!ys || !xs) {
+    return whole;
+  }
+
+  const marginX = Math.round(width * 0.03);
+  const marginY = Math.round(height * 0.03);
+  const x = Math.max(0, xs.first - marginX);
+  const y = Math.max(0, ys.first - marginY);
+  const box = {
+    x,
+    y,
+    width: Math.min(width, xs.last + marginX) - x,
+    height: Math.min(height, ys.last + marginY) - y
+  };
+  // Un cadre minuscule trahit une tache plutôt qu'un document.
+  return box.width * box.height < width * height * 0.02 ? whole : box;
+}
+
+/** Copie tournée d'un quart de tour, d'un demi-tour ou de trois quarts. */
+async function rotated(canvas: Canvas, degrees: number): Promise<Canvas> {
+  if (!degrees) {
+    return canvas;
+  }
+  const { createCanvas } = await import('@napi-rs/canvas');
+  const quarter = degrees % 180 !== 0;
+  const out = createCanvas(quarter ? canvas.height : canvas.width, quarter ? canvas.width : canvas.height);
+  const ctx = out.getContext('2d');
+  ctx.translate(out.width / 2, out.height / 2);
+  ctx.rotate((degrees * Math.PI) / 180);
+  ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+  return out;
+}
+
+/**
+ * Reconnaissance d'une ou plusieurs images.
+ *
+ * Une photo prise de travers, voire tête en bas, est courante : si la
+ * première lecture est peu sûre, les autres orientations sont essayées et la
+ * plus confiante l'emporte. La bande MRZ, elle, fait l'objet d'une passe à
+ * part, restreinte à son alphabet, qui n'est retenue que si ses chiffres de
+ * contrôle concordent.
+ */
+async function readImages(sources: Buffer[]): Promise<DocumentText> {
   const { createWorker } = await import('tesseract.js');
   await mkdir(CACHE_PATH, { recursive: true });
 
   const worker = await createWorker(OCR_LANGUAGES.split('+'), 1, { cachePath: CACHE_PATH });
-  try {
+  const recognize = async (image: Buffer | Canvas) => {
+    const input = Buffer.isBuffer(image) ? image : image.toBuffer('image/png');
     const recognition = await Promise.race([
-      worker.recognize(path),
+      // rotateAuto redresse une photo prise légèrement de biais.
+      worker.recognize(input, { rotateAuto: true }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('délai dépassé')), OCR_TIMEOUT_MS))
     ]);
-    return String(recognition.data.text || '');
+    return { text: String(recognition.data.text || ''), confidence: recognition.data.confidence };
+  };
+
+  try {
+    const texts: string[] = [];
+    let mrzText: string | undefined;
+
+    for (const source of sources) {
+      const prepared = await prepareImage(source);
+      if (!prepared) {
+        texts.push((await recognize(source)).text);
+        continue;
+      }
+
+      // L'orientation est déterminée sur la version « encre », la plus nette,
+      // puis appliquée à l'autre.
+      let best = { ...(await recognize(prepared.ink)), degrees: 0 };
+      if (best.confidence < OCR_CONFIDENCE_OK) {
+        for (const degrees of [180, 90, 270]) {
+          const attempt = await recognize(await rotated(prepared.ink, degrees));
+          if (attempt.confidence > best.confidence) {
+            best = { ...attempt, degrees };
+          }
+          if (best.confidence >= OCR_CONFIDENCE_OK) {
+            break;
+          }
+        }
+      }
+      const luma = (await recognize(await rotated(prepared.luma, best.degrees))).text;
+      texts.push(luma, best.text);
+
+      // La date de naissance est ce qui compte le plus (elle fixe la prime) :
+      // tant qu'elle n'est pas validée par son chiffre de contrôle, la passe
+      // dédiée à la bande est tentée.
+      const hasBirthdate = (value: string) => Boolean(readMrz(value).fields.birthdate);
+      if (mrzText) {
+        continue;
+      }
+      const readable = [best.text, luma].find(hasBirthdate);
+      if (readable) {
+        mrzText = readable;
+        continue;
+      }
+      await worker.setParameters({ tessedit_char_whitelist: MRZ_ALPHABET });
+      try {
+        const orientations = [best.degrees, ...[0, 180, 90, 270].filter((d) => d !== best.degrees)];
+        for (const degrees of orientations) {
+          const attempt = await recognize(await rotated(prepared.ink, degrees));
+          if (hasBirthdate(attempt.text)) {
+            mrzText = attempt.text;
+            break;
+          }
+        }
+      } finally {
+        await worker.setParameters({ tessedit_char_whitelist: '' });
+      }
+    }
+
+    // Les deux versions de chaque image se recoupent largement : les lignes
+    // identiques ne sont gardées qu'une fois, pour ne pas alourdir ce qui
+    // sera ensuite confié au modèle de langage.
+    const seen = new Set<string>();
+    const text = texts.join('\n').split('\n').filter((line) => {
+      const key = line.trim();
+      if (!key) {
+        return true;
+      }
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    }).join('\n');
+    return { text, mrzText };
   } finally {
     await worker.terminate();
   }
@@ -132,7 +403,9 @@ function findBirthdate(text: string): ExtractedField | undefined {
 
 /** NPA et localité, tels qu'ils apparaissent sur une adresse suisse. */
 function findLocality(text: string): { plz?: ExtractedField; location?: ExtractedField } {
-  const match = text.match(/\b([1-9]\d{3})\s+([A-ZÄÖÜÉÈÀ][\wäöüéèàç'’-]{2,30}(?:\s[A-ZÄÖÜÉÈÀ][\wäöüéèàç'’-]{2,30})?)/);
+  // Même ligne, et pas la fin d'une date (« 12.03.1985 ») : sans quoi une
+  // année suivie de la ligne d'après passerait pour une adresse.
+  const match = text.match(/(?<![\d.])\b([1-9]\d{3})[ \t]+([A-ZÄÖÜÉÈÀ][\wäöüéèàç'’-]{2,30}(?:[ \t][A-ZÄÖÜÉÈÀ][\wäöüéèàç'’-]{2,30})?)/);
   if (!match) {
     return {};
   }
@@ -379,15 +652,35 @@ const NATIONALITIES: Record<string, string> = {
 function readMrz(text: string): {
   fields: Partial<ExtractionResult['fields']>;
   warnings: string[];
+  /** Au moins un chiffre de contrôle concorde : la bande a vraiment été lue. */
+  valid: boolean;
 } {
   const found = findMrzLines(text);
   if (!found) {
-    return { fields: {}, warnings: [] };
+    return { fields: {}, warnings: [], valid: false };
   }
 
   const { format, lines } = found;
   const fields: Partial<ExtractionResult['fields']> = {};
   const warnings: string[] = [];
+
+  // Sans aucun chiffre de contrôle concordant, ce « bloc » n'est le plus
+  // souvent que du bruit de reconnaissance mis en forme : noms et nationalité
+  // qu'on en tirerait seraient inventés.
+  const docLine = format === 'TD1' ? lines[0] : lines[1];
+  const docStart = format === 'TD1' ? 5 : 0;
+  const docValid = mrzCheckOk(docLine.slice(docStart, docStart + 9),
+    asDigits(docLine.charAt(docStart + 9)));
+  const birthData = format === 'TD1' ? lines[1].slice(0, 7) : lines[1].slice(13, 20);
+  const birthValid = mrzCheckOk(asDigits(birthData.slice(0, 6)), asDigits(birthData.charAt(6)));
+  if (!docValid && !birthValid) {
+    return {
+      fields: {},
+      warnings: ['La bande de caractères de votre pièce a été repérée, mais pas lue de façon ' +
+        'fiable : ses données n\'ont pas été reprises.'],
+      valid: false
+    };
+  }
 
   // Positions du bloc « naissance / sexe / expiration / nationalité » et du
   // champ des noms, selon le format.
@@ -434,7 +727,7 @@ function readMrz(text: string): {
     fields.firstname = { value: names.firstname, evidence: 'bande MRZ' };
   }
 
-  return { fields, warnings };
+  return { fields, warnings, valid: true };
 }
 
 /** Formats acceptés au dépôt. */
@@ -453,8 +746,9 @@ export async function extractFromDocument(
   const warnings: string[] = [];
 
   let text: string;
+  let mrzText: string | undefined;
   try {
-    text = isPdf ? await readPdf(path) : await readImage(path);
+    ({ text, mrzText } = await readDocument(path, isPdf));
   } catch (err) {
     throw new Error(
       isPdf
@@ -468,7 +762,7 @@ export async function extractFromDocument(
   if (compact.trim().length < 20) {
     warnings.push(
       isPdf
-        ? 'Ce PDF ne contient pas de texte : il s\'agit probablement d\'un scan. Photographiez plutôt le document.'
+        ? 'Très peu de texte a été reconnu dans ce PDF : le scan est peut-être trop pâle ou de trop basse résolution.'
         : 'Très peu de texte a été reconnu sur l\'image.'
     );
   }
@@ -480,8 +774,8 @@ export async function extractFromDocument(
   // La bande MRZ passe en dernier et écrase le reste : ses champs sont
   // vérifiés par chiffre de contrôle, là où le texte libre est deviné.
   // Elle est cherchée dans le texte d'origine, ses lignes devant rester
-  // entières.
-  const mrz = readMrz(text);
+  // entières — ou dans la passe qui lui a été dédiée, quand il a fallu une.
+  const mrz = readMrz(mrzText ?? text);
   warnings.push(...mrz.warnings);
 
   const fields: ExtractionResult['fields'] = {

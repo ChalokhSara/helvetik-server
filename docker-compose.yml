@@ -110,7 +110,10 @@ services:
       # relancer le conteneur.
       - ./api/src:/app/src
       - ./api/public:/app/public
-    command: npm run dev
+    # --legacy-watch : scrutation périodique des fichiers. Sous Docker Desktop
+    # (Windows, macOS), un volume monté ne transmet pas les événements de
+    # modification : sans elle, nodemon ne voit jamais rien changer.
+    command: npx nodemon --legacy-watch --watch src --ext ts,json src/app.ts
     environment:
       <<: *api-env
       NODE_ENV: development

@@ -13,9 +13,11 @@ import {
   logoPicture,
   messages,
   money,
+  onboardingProgress,
   sitePage,
   siteCardPage,
   siteSplashPage,
+  skipStepButton,
   toDateInputValue
 } from './layout';
 import {
@@ -76,19 +78,16 @@ export function renderRegister(options: {
   error?: string;
   invalidFields?: string[];
 }): string {
-  return sitePage('Helvetik — Créer un compte', {}, `    <h1>Créer mon compte</h1>
-    <p class="lead">Quatre informations suffisent pour commencer. Il vous sera ensuite
-    demandé une photo des deux faces de votre pièce d'identité : votre nom et votre date
-    de naissance en seront lus, et une copie doit accompagner vos lettres de résiliation.</p>
+  return sitePage('Helvetik — Créer un compte', { scenic: true }, `    <h1>Créer mon compte</h1>
 ${messages(options)}
-    <form method="post" action="/inscription" class="card" id="main-form"${invalidAttr(options.invalidFields)}>
+    <form method="post" action="/inscription" class="card card-glass" id="main-form"${invalidAttr(options.invalidFields)}>
       ${csrfField(options.csrf)}
 ${errorSummary()}
 ${accountFields(options.values)}
 ${validationScript()}
       <div class="actions">
         <button type="submit">Créer mon compte</button>
-        <a class="link" href="/connexion">J'ai déjà un compte</a>
+        <a class="btn btn-ghost" href="/connexion">J'ai déjà un compte</a>
       </div>
     </form>`);
 }
@@ -158,8 +157,8 @@ export function renderIdentity(o: {
     ? `Pièce d'identité de ${escapeHtml(o.clientLabel)}`
     : o.fresh ? 'Bienvenue — dernière étape' : 'Ma pièce d\'identité';
 
-  return sitePage('Helvetik — Pièce d\'identité', { email: o.email, active: 'assures' },
-    `    <h1>${title}</h1>
+  return sitePage('Helvetik — Pièce d\'identité', { email: o.email, active: 'assures', onboarding: o.fresh },
+    `${o.fresh ? onboardingProgress(1) : ''}    <h1>${title}</h1>
     <p class="lead">Photographiez les <strong>deux faces</strong> de votre carte d'identité,
     de votre passeport ou de votre permis. Elles sont conservées pour être jointes
     à vos lettres de résiliation et d'affiliation : les caisses les exigent.</p>
@@ -204,9 +203,24 @@ ${text(o.values, 'nationality', 'Nationalité', 'type="text" placeholder="CH"', 
 ${validationScript()}
       <div class="actions">
         <button type="submit">Enregistrer</button>
-        <a class="link" href="${o.clientUid ? '/espace/assures' : '/espace'}">${o.fresh ? 'Plus tard' : 'Retour'}</a>
+        ${o.fresh ? '' : `<a class="link" href="${o.clientUid ? '/espace/assures' : '/espace'}">Retour</a>`}
       </div>
-    </form>`);
+    </form>
+${o.fresh ? skipStepButton(`${base}/ignorer`, o.csrf) : ''}`);
+}
+
+/** Étape 3 (facultative) du parcours de mise en route : conjoint, enfants. */
+export function renderHouseholdPrompt(o: { email: string; csrf: string }): string {
+  return sitePage('Helvetik — Votre foyer', { email: o.email, active: 'accueil', onboarding: true },
+    `${onboardingProgress(3)}    <h1>Vivez-vous en famille ?</h1>
+    <p class="lead">Ajoutez vos autres assurés — conjoint, enfants — pour rassembler leurs
+    contrats au même endroit et recevoir un rappel avant chaque échéance, comme pour vous.</p>
+    <div class="card" style="text-align:center">
+      <div class="actions" style="justify-content:center">
+        <a class="btn" href="/espace/assures/nouveau">Ajouter un assuré</a>
+      </div>
+    </div>
+${skipStepButton('/espace/bienvenue/foyer/ignorer', o.csrf, 'Non, plus tard')}`);
 }
 
 // -------------------------------------------------------------- dashboard
@@ -478,6 +492,8 @@ export function renderInsuranceForm(o: {
   invalidFields?: string[];
   /** Caisses et modèles officiels de la région, pour remplacer la saisie libre. */
   catalogue?: LamalCatalogue;
+  /** Vrai tant que le foyer n'a aucun contrat : étape 2 du parcours de mise en route. */
+  firstInsurance?: boolean;
 }): string {
   const editing = Boolean(o.uid);
   const action = editing
@@ -485,8 +501,8 @@ export function renderInsuranceForm(o: {
     : '/espace/assurances/nouvelle';
 
   return sitePage(`Helvetik — ${editing ? 'Modifier un contrat' : 'Ajouter un contrat'}`,
-    { email: o.email, active: 'assurances' },
-    `    <h1>${editing ? 'Modifier un contrat' : 'Ajouter un contrat'}</h1>
+    { email: o.email, active: 'assurances', onboarding: o.firstInsurance },
+    `${o.firstInsurance ? onboardingProgress(2) : ''}    <h1>${editing ? 'Modifier un contrat' : 'Ajouter un contrat'}</h1>
 ${messages(o)}
 ${editing ? '' : importBlock({
       action: '/espace/assurances/importer',
@@ -500,9 +516,10 @@ ${insuranceFields(o.values, o.insuredOptions, formatDate(lamalPeriodEnd()), o.ca
 ${validationScript()}
       <div class="actions">
         <button type="submit">${editing ? 'Enregistrer' : 'Ajouter'}</button>
-        <a class="link" href="/espace/assurances">Annuler</a>
+        ${o.firstInsurance ? '' : '<a class="link" href="/espace/assurances">Annuler</a>'}
       </div>
-    </form>`);
+    </form>
+${o.firstInsurance ? skipStepButton('/espace/assurances/nouvelle/ignorer', o.csrf) : ''}`);
 }
 
 export function insuranceToValues(insurance: IInsurance): Values {

@@ -20,7 +20,7 @@ export interface ClientPayload {
   plz: string;
   location: string;
   canton: string;
-  avsNum: string;
+  avsNum?: string;
 }
 
 export interface ClientPayloadResult {
@@ -42,8 +42,8 @@ export function readClientPayload(
   const str = (key: string) => String(source[key] ?? '').trim();
 
   // La date de naissance n'est plus exigée : l'inscription se limite au
-  // contact, à l'adresse et au numéro AVS. Elle reste vérifiée dès qu'elle
-  // est fournie, car une date fausse fausserait toute la comparaison.
+  // contact et à l'adresse. Elle reste vérifiée dès qu'elle est fournie, car
+  // une date fausse fausserait toute la comparaison.
   let birthdate: Date | undefined;
   const rawBirthdate = str('birthdate');
   if (rawBirthdate) {
@@ -74,7 +74,7 @@ export function readClientPayload(
       plz: str('plz'),
       location: str('location'),
       canton: str('canton'),
-      avsNum: str('avsNum')
+      avsNum: optional('avsNum')
     }
   };
 }

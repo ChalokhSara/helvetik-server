@@ -167,6 +167,32 @@ const STYLES = `
   }
   .card h2 { margin-bottom: .5rem; }
   .muted { color: var(--muted); font-size: .88rem; }
+  /* Conseil rattaché à un champ : collé sous son input, sans l'espacement d'un paragraphe libre. */
+  .field-hint { margin: -.7rem 0 1rem; color: var(--muted); font-size: .82rem; }
+
+  /* Page « décor » : même photo et même carte vitrée que l'accueil, pour les
+     pages qui prolongent son parcours (ex. inscription). */
+  body:has(main.scenic) {
+    background: url('/chalet-bg.jpg') center/cover no-repeat fixed;
+  }
+  .card-glass {
+    background: color-mix(in srgb, var(--surface) 82%, transparent);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+
+  /* --- parcours de mise en route (après inscription) --- */
+  @keyframes onboarding-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  main.onboarding-enter { animation: onboarding-in .35s ease-out; }
+  .onboarding-progress { display: flex; gap: .4rem; margin-bottom: .5rem; }
+  .onboarding-progress span { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+  .onboarding-progress span.done, .onboarding-progress span.current { background: var(--brand); }
+  .onboarding-step {
+    color: var(--muted); font-size: .78rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .04em; margin: 0 0 1rem;
+  }
+  .onboarding-skip { margin: 0; }
+  .onboarding-skip .btn { width: auto; }
 
   /* --- formulaires --- */
   label { display: block; margin: 0 0 .35rem; font-size: .85rem; font-weight: 600; }
@@ -242,6 +268,18 @@ const STYLES = `
   .btn-ghost:hover { background: var(--bg); }
   .btn-danger { background: transparent; color: var(--err-ink); border: 1px solid var(--line); }
   .btn-danger:hover { background: var(--err-bg); }
+  /* Envoi en cours : un anneau tourne devant le libellé, dans la couleur du texte du bouton. */
+  @keyframes spin { to { transform: rotate(360deg); } }
+  button.is-busy, button.is-busy:disabled { cursor: progress; opacity: .85; }
+  button.is-busy::before {
+    content: ''; flex: none;
+    width: 1em; height: 1em; margin-right: .55em;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    button.is-busy::before { animation-duration: 1.6s; }
+  }
   .actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-top: .5rem; }
   .actions .link { color: var(--muted); text-decoration: none; font-size: .9rem; }
 
@@ -298,6 +336,17 @@ const STYLES = `
   .stat .label { display: block; font-size: .85rem; color: var(--muted); margin-top: .15rem; }
   .stat.accent { background: var(--brand); border-color: var(--brand); color: #fff; }
   .stat.accent .label { color: rgba(255,255,255,.85); }
+  /* État des faces d'une pièce d'identité, l'une sous l'autre. */
+  .face-status {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem;
+    padding: .65rem .8rem; margin-bottom: .5rem;
+    border-radius: 8px; background: var(--warn-bg); color: var(--warn-ink); font-size: .9rem;
+    overflow-wrap: anywhere;
+  }
+  .face-status.ok { background: var(--ok-bg); color: var(--ok-ink); }
+  .face-actions { display: flex; gap: .4rem; }
+  .face-actions form { margin: 0; }
+  .face-actions .btn, .face-actions button { padding: .4rem .75rem; font-size: .85rem; }
   /* Légende nommant la stratégie comparée, au-dessus du montant. */
   .stat .cap {
     display: block; margin-bottom: .3rem;
@@ -483,6 +532,8 @@ const STYLES = `
     .items .right { text-align: left; margin-left: 0; }
     button, .btn { width: 100%; }
     .actions { flex-direction: column; align-items: stretch; }
+    .face-actions { width: 100%; }
+    .face-actions > * { flex: 1; }
   }
 `;
 
@@ -490,6 +541,10 @@ export interface SiteContext {
   /** Nom affiché dans la barre du haut ; absent = visiteur non connecté. */
   email?: string;
   active?: 'accueil' | 'assures' | 'assurances' | 'optimisation' | 'compte';
+  /** Photo de fond et carte vitrée, comme l'accueil — pour les pages qui prolongent son parcours. */
+  scenic?: boolean;
+  /** Légère animation d'entrée, pour les étapes du parcours de mise en route. */
+  onboarding?: boolean;
 }
 
 function tabs(active?: string): string {
@@ -528,20 +583,55 @@ export function sitePage(title: string, ctx: SiteContext, body: string): string 
     ${account}
   </header>
 ${tabs(ctx.active)}
-  <main>
+  <main class="${[ctx.scenic && 'scenic', ctx.onboarding && 'onboarding-enter'].filter(Boolean).join(' ')}">
 ${body}
   </main>
-  <script>
-    // Confirmation avant les actions destructrices, sans script en ligne
-    // dans les attributs : les données affichées restent du texte échappé.
-    document.addEventListener('submit', function (event) {
-      var message = event.target.getAttribute('data-confirm');
-      if (message && !window.confirm(message)) { event.preventDefault(); }
-    });
-  </script>
+${PAGE_SCRIPT}
 </body>
 </html>`;
 }
+
+/**
+ * Comportements communs à toutes les pages.
+ *
+ * - Confirmation avant les actions destructrices, sans script en ligne dans
+ *   les attributs : les données affichées restent du texte échappé.
+ * - Bouton « occupé » pendant l'envoi d'un formulaire : certaines analyses
+ *   (reconnaissance de texte, lecture d'une police) prennent plusieurs
+ *   secondes, pendant lesquelles rien ne dit sinon que la demande est partie.
+ *   Le bouton n'est désactivé qu'au tour suivant : désactivé tout de suite,
+ *   il sortirait des données envoyées, avec son éventuelle valeur.
+ *   Les formulaires qui annulent l'envoi pour le relancer eux-mêmes (photo
+ *   réduite, signature convertie) appellent `helvetikBusy` directement.
+ */
+const PAGE_SCRIPT = `  <script>
+    (function () {
+      function busy(form, submitter) {
+        var button = submitter || form.querySelector('button[type=submit], button:not([type])');
+        if (!button || button.classList.contains('is-busy')) { return; }
+        button.classList.add('is-busy');
+        button.setAttribute('aria-busy', 'true');
+        setTimeout(function () { button.disabled = true; }, 0);
+      }
+      window.helvetikBusy = busy;
+
+      document.addEventListener('submit', function (event) {
+        var message = event.target.getAttribute('data-confirm');
+        if (message && !window.confirm(message)) { event.preventDefault(); return; }
+        if (!event.defaultPrevented) { busy(event.target, event.submitter); }
+      });
+
+      // Retour arrière depuis la page suivante : le navigateur peut restituer
+      // la page telle qu'elle était, bouton bloqué compris.
+      window.addEventListener('pageshow', function () {
+        document.querySelectorAll('.is-busy').forEach(function (button) {
+          button.classList.remove('is-busy');
+          button.removeAttribute('aria-busy');
+          button.disabled = false;
+        });
+      });
+    })();
+  </script>`;
 
 /** Écran plein cadre sans topbar ni onglets, pour l'accueil style application mobile. */
 export function siteSplashPage(title: string, body: string): string {
@@ -559,6 +649,7 @@ export function siteSplashPage(title: string, body: string): string {
   <main class="splash">
 ${body}
   </main>
+${PAGE_SCRIPT}
 </body>
 </html>`;
 }
@@ -591,4 +682,20 @@ export function messages(options: { error?: string; notice?: string; info?: stri
 
 export function csrfField(token: string): string {
   return `<input type="hidden" name="_csrf" value="${escapeHtml(token)}">`;
+}
+
+/** Barre de progression du parcours de mise en route, 3 étapes fixes. */
+export function onboardingProgress(step: 1 | 2 | 3): string {
+  const dot = (n: number) =>
+    `<span class="${n < step ? 'done' : n === step ? 'current' : ''}"></span>`;
+  return `    <div class="onboarding-progress">${dot(1)}${dot(2)}${dot(3)}</div>
+    <p class="onboarding-step">Étape ${step} sur 3</p>`;
+}
+
+/** Bouton « Ignorer cette étape » : poste vers une route dédiée, sans quitter le formulaire principal. */
+export function skipStepButton(action: string, csrf: string, label = 'Ignorer cette étape'): string {
+  return `<form method="post" action="${action}" class="onboarding-skip">
+      ${csrfField(csrf)}
+      <button type="submit" class="btn btn-ghost">${escapeHtml(label)}</button>
+    </form>`;
 }

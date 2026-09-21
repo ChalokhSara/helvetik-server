@@ -32,6 +32,7 @@ import {
   hasDocument,
   isAcceptedDocument,
   listDocuments,
+  MAX_DOCUMENT_BYTES as MAX_IDENTITY_BYTES,
   retrieveDocument,
   storeDocument,
   VaultError
@@ -89,6 +90,40 @@ const upload = multer({
   limits: { fileSize: MAX_DOCUMENT_BYTES, files: 1 }
 });
 
+/**
+ * Recto et verso d'une pièce d'identité, en un seul envoi. Un fichier trop
+ * lourd n'est pas une erreur serveur : il est signalé sur la page, via
+ * `req.uploadError`, plutôt que de laisser multer renvoyer une page brute.
+ */
+const identityFields = multer({
+  dest: tmpdir(),
+  limits: { fileSize: MAX_IDENTITY_BYTES, files: 2 }
+}).fields([{ name: 'recto', maxCount: 1 }, { name: 'verso', maxCount: 1 }]);
+
+function uploadIdentity(req: Request, res: Response, next: NextFunction) {
+  identityFields(req, res, (err: unknown) => {
+    if (err instanceof multer.MulterError) {
+      res.locals.uploadError = err.code === 'LIMIT_FILE_SIZE'
+        ? `Le fichier dépasse ${Math.round(MAX_IDENTITY_BYTES / (1024 * 1024))} Mo. ` +
+          'Réduisez sa résolution ou exportez-le en JPEG.'
+        : 'Envoi refusé : déposez au plus un fichier pour le recto et un pour le verso.';
+      return next();
+    }
+    next(err);
+  });
+}
+
+/** Fichiers temporaires reçus par multer, quelle que soit la forme de l'envoi. */
+function uploadedFiles(req: Request): Express.Multer.File[] {
+  if (req.file) {
+    return [req.file];
+  }
+  if (Array.isArray(req.files)) {
+    return req.files;
+  }
+  return Object.values(req.files || {}).flat();
+}
+
 // Les formulaires postent en urlencoded ; chaque mutation porte le jeton CSRF.
 // Les envois multipart font exception : leur corps n'est analysé qu'après
 // multer, la vérification a donc lieu dans la route concernée.
@@ -101,9 +136,7 @@ async function verifyUploadCsrf(req: Request, res: Response, next: NextFunction)
   if (isCsrfValid(req)) {
     return next();
   }
-  if (req.file) {
-    await unlink(req.file.path).catch(() => undefined);
-  }
+  await Promise.all(uploadedFiles(req).map((f) => unlink(f.path).catch(() => undefined)));
   res.status(403).type('text/plain').send(CSRF_REJECTION_MESSAGE);
 }
 
@@ -342,11 +375,12 @@ router.get('/inscription', async (req: Request, res: Response) => {
 });
 
 /**
- * L'inscription ne demande que l'email, le mot de passe, le téléphone,
- * l'adresse et le numéro AVS. L'identité — nom, prénom, date de naissance —
- * est réclamée juste après, par lecture d'une pièce d'identité.
+ * L'inscription ne demande que l'email, le mot de passe, le téléphone et
+ * l'adresse. L'identité — nom, prénom, date de naissance — est réclamée
+ * juste après, par lecture d'une pièce d'identité ; le numéro AVS n'est
+ * redemandé qu'à la souscription d'une police.
  */
-const REGISTER_FIELDS = ['accountEmail', 'phone', 'road', 'plz', 'location', 'canton', 'avsNum'];
+const REGISTER_FIELDS = ['accountEmail', 'phone', 'road', 'plz', 'location', 'canton'];
 
 router.post('/inscription', async (req: Request, res: Response) => {
   const values = fieldValues(req.body, REGISTER_FIELDS);
@@ -390,7 +424,14 @@ router.post('/inscription', async (req: Request, res: Response) => {
 
   try {
     const salt = generateSalt();
-    const user = new User({ email: accountEmail, salt, password: await hashPassword(password, salt) });
+    const user = new User({
+      email: accountEmail,
+      salt,
+      password: await hashPassword(password, salt),
+      // Déclenche le parcours de mise en route (pièce d'identité, première
+      // assurance, foyer) à la première visite de /espace.
+      onboarding: { active: true }
+    });
 
     let token: string | undefined;
     if (confirmationRequired) {
@@ -450,6 +491,20 @@ router.get('/espace', async (req: Request, res: Response) => {
       Insurance.find({ userUid: user.uid })
     ]);
 
+    // Parcours de mise en route : tant qu'il est actif, l'accueil redirige
+    // vers la première étape non traitée plutôt que de s'afficher.
+    if (user.onboarding.active) {
+      const holder = await accountHolder(user.uid);
+      const identityDone = Boolean(holder?.birthdate && holder?.firstname && holder?.name);
+      if (holder && !identityDone && !user.onboarding.identitySkipped) {
+        return res.redirect('/espace/identite');
+      }
+      if (!insurances.length && !user.onboarding.insuranceSkipped) {
+        return res.redirect('/espace/assurances/nouvelle');
+      }
+      return res.redirect('/espace/bienvenue/foyer');
+    }
+
     const monthlyTotal = insurances.reduce(
       (sum, i) => sum + monthlyPremium(i.premiumAmount, i.premiumFrequency), 0
     );
@@ -493,13 +548,30 @@ router.get('/espace', async (req: Request, res: Response) => {
       notice: ({
         ok: 'Modifications enregistrées.',
         identite: 'Identité enregistrée.',
-        bienvenue: 'Bienvenue ! Votre compte est prêt : commencez par ajouter votre assurance de base.'
+        bienvenue: 'Bienvenue ! Votre compte est prêt : commencez par ajouter votre assurance de base.',
+        pret: 'Votre compte est configuré. Bienvenue sur Helvetik !'
       } as Record<string, string>)[String(req.query.msg || '')]
     }));
   } catch (err) {
     console.error('Erreur du tableau de bord:', err);
     res.status(500).type('html').send('Erreur serveur.');
   }
+});
+
+// Étape 3 (facultative) du parcours de mise en route : proposer d'ajouter
+// d'autres assurés du foyer. Répondre, dans un sens ou dans l'autre, y met fin.
+router.get('/espace/bienvenue/foyer', (req: Request, res: Response) => {
+  const user = req.siteUser!;
+  if (!user.onboarding.active) {
+    return res.redirect('/espace');
+  }
+  res.type('html').send(views.renderHouseholdPrompt({ email: user.email, csrf: csrfToken(req) }));
+});
+
+router.post('/espace/bienvenue/foyer/ignorer', async (req: Request, res: Response) => {
+  req.siteUser!.onboarding.active = false;
+  await req.siteUser!.save();
+  res.redirect('/espace?msg=pret');
 });
 
 // ----------------------------------------------------------------- assurés
@@ -670,80 +742,86 @@ async function showIdentity(req: Request, res: Response) {
 async function depositIdentityDocument(req: Request, res: Response) {
   const user = req.siteUser!;
   const target = await identityTarget(req);
-
-  if (!target) {
-    if (req.file) {
-      await unlink(req.file.path).catch(() => undefined);
-    }
-    return res.redirect(req.params.uid ? '/espace/assures' : '/espace/assures/nouveau');
-  }
-
-  const side = readSide(String(req.body?.side || ''));
-  const file = req.file;
+  const files = (req.files || {}) as Record<string, Express.Multer.File[] | undefined>;
+  // Recto d'abord : le verso porte la bande MRZ, la plus fiable, et doit
+  // l'emporter quand les deux faces donnent une valeur.
+  const received = (['RECTO', 'VERSO'] as const)
+    .map((side) => ({ side, file: files[side.toLowerCase()]?.[0] }))
+    .filter((entry): entry is { side: 'RECTO' | 'VERSO'; file: Express.Multer.File } =>
+      Boolean(entry.file));
 
   try {
-    if (!side) {
+    if (!target) {
+      return res.redirect(req.params.uid ? '/espace/assures' : '/espace/assures/nouveau');
+    }
+    if (res.locals.uploadError) {
+      return await renderIdentityPage(req, res, target, { error: res.locals.uploadError, status: 400 });
+    }
+    if (!received.length) {
       return await renderIdentityPage(req, res, target, {
-        error: 'Face inconnue : indiquez le recto ou le verso.', status: 400
+        error: 'Aucun fichier reçu : choisissez le recto, le verso, ou les deux.', status: 400
       });
     }
-    if (!file) {
+    const refused = received.find(({ file }) => !isAcceptedDocument(file.mimetype, file.originalname));
+    if (refused) {
       return await renderIdentityPage(req, res, target, {
-        error: `Aucun fichier reçu pour le ${KIND_LABELS[side]}.`, status: 400
-      });
-    }
-    if (!isAcceptedDocument(file.mimetype, file.originalname)) {
-      return await renderIdentityPage(req, res, target, {
-        error: 'Format non pris en charge : déposez une photo (JPEG, PNG) ou un PDF.',
+        error: `Format du ${KIND_LABELS[refused.side]} non pris en charge : ` +
+          'déposez une photo (JPEG, PNG, HEIC) ou un PDF.',
         status: 400
       });
     }
 
-    const stored = await storeDocument({
-      userUid: user.uid,
-      clientUid: target.client.uid,
-      kind: side,
-      path: file.path,
-      filename: file.originalname,
-      mimetype: file.mimetype
-    });
-
-    // La reconnaissance ne porte que sur ce qui vient d'être déposé. Le verso
-    // porte la bande MRZ, donc l'essentiel ; le recto n'apporte souvent qu'une
-    // confirmation, mais rien n'oblige l'assuré à respecter l'ordre.
     const values = identityValues(target.client);
     const warnings: string[] = [];
-    let info = stored.replaced
-      ? `Le ${KIND_LABELS[side]} a remplacé la pièce précédente.`
-      : `Le ${KIND_LABELS[side]} est enregistré.`;
+    const saved: string[] = [];
+    const summaries: string[] = [];
 
-    try {
-      const result = await extractFromDocument(file.path, file.mimetype, file.originalname);
-      // Ce qui est lu prime sur les valeurs déjà en base : l'assuré vient
-      // précisément de fournir la pièce pour les corriger.
-      let recognised = false;
-      for (const key of IDENTITY_FIELDS) {
-        const field = (result.fields as Record<string, { value: string } | undefined>)[key];
-        if (field) {
-          values[key] = field.value;
-          recognised = true;
+    for (const { side, file } of received) {
+      // Chaque face est enregistrée avant d'être analysée : une reconnaissance
+      // qui échoue ne doit pas faire perdre la photo.
+      await storeDocument({
+        userUid: user.uid,
+        clientUid: target.client.uid,
+        kind: side,
+        path: file.path,
+        filename: file.originalname,
+        mimetype: file.mimetype
+      });
+      saved.push(KIND_LABELS[side]);
+
+      try {
+        const result = await extractFromDocument(file.path, file.mimetype, file.originalname);
+        // Ce qui est lu prime sur les valeurs déjà en base : l'assuré vient
+        // précisément de fournir la pièce pour les corriger.
+        let recognised = false;
+        for (const key of IDENTITY_FIELDS) {
+          const field = (result.fields as Record<string, { value: string } | undefined>)[key];
+          if (field) {
+            values[key] = field.value;
+            recognised = true;
+          }
         }
+        warnings.push(...result.warnings);
+        if (recognised) {
+          summaries.push(describeExtraction(result));
+        }
+      } catch (err) {
+        warnings.push(`Le ${KIND_LABELS[side]} est enregistré, mais n'a pas pu être analysé ` +
+          `(${(err as Error).message}).`);
       }
-      warnings.push(...result.warnings);
-      info += recognised
-        ? ` ${describeExtraction(result)}`
-        : ' Aucune donnée n\'a pu en être lue : la bande de caractères figure au verso. ' +
-          'Vous pouvez aussi saisir les champs à la main.';
-    } catch (err) {
-      // Le document est conservé quand même : c'est le but premier du dépôt.
-      warnings.push(
-        `La pièce est enregistrée, mais n'a pas pu être analysée (${(err as Error).message})`
-      );
     }
 
-    await renderIdentityPage(req, res, target, { values, info, warnings });
+    const info = `${saved.length === 2 ? 'Recto et verso enregistrés.' : `${capitalize(saved[0])} enregistré.`} ` +
+      (summaries.length
+        ? summaries.join(' ')
+        : 'Aucune donnée n\'a pu être lue automatiquement : vérifiez ou saisissez les champs ci-dessous.');
+
+    await renderIdentityPage(req, res, target, { values, info, warnings: [...new Set(warnings)] });
   } catch (err) {
     console.error('Erreur de dépôt de pièce d\'identité:', err);
+    if (!target) {
+      return res.redirect('/espace');
+    }
     await renderIdentityPage(req, res, target, {
       error: err instanceof VaultError
         ? err.message
@@ -751,10 +829,12 @@ async function depositIdentityDocument(req: Request, res: Response) {
       status: 400
     });
   } finally {
-    if (file) {
-      await unlink(file.path).catch(() => undefined);
-    }
+    await Promise.all(uploadedFiles(req).map((f) => unlink(f.path).catch(() => undefined)));
   }
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 /**
@@ -819,6 +899,10 @@ async function saveIdentity(req: Request, res: Response) {
   const fail = (error: string, invalidFields: string[] = []) =>
     renderIdentityPage(req, res, target, { values, error, invalidFields, status: 400 });
 
+  // Capturé avant modification : c'est l'étape 1 du parcours de mise en
+  // route tant que le titulaire n'avait pas encore de date de naissance.
+  const wasOnboardingStep = target.isHolder && !client.birthdate;
+
   const rawBirthdate = String(values.birthdate || '');
   if (rawBirthdate) {
     const birthdate = new Date(rawBirthdate);
@@ -843,6 +927,10 @@ async function saveIdentity(req: Request, res: Response) {
 
   try {
     await client.save();
+    if (wasOnboardingStep && req.siteUser!.onboarding.active) {
+      // Retour à /espace, qui renvoie vers l'étape suivante encore en attente.
+      return res.redirect('/espace');
+    }
     res.redirect(target.isHolder ? '/espace?msg=identite' : '/espace/assures?msg=identite');
   } catch (err) {
     console.error('Erreur d\'enregistrement de l\'identité (site):', err);
@@ -853,15 +941,22 @@ async function saveIdentity(req: Request, res: Response) {
 
 // Titulaire du compte.
 router.get('/espace/identite', showIdentity);
-router.post('/espace/identite/deposer', upload.single('document'), verifyUploadCsrf,
+router.post('/espace/identite/deposer', uploadIdentity, verifyUploadCsrf,
   depositIdentityDocument);
 router.get('/espace/identite/:side(recto|verso)', serveIdentityDocument);
 router.post('/espace/identite/:side(recto|verso)/supprimer', removeIdentityDocument);
 router.post('/espace/identite', saveIdentity);
 
+// Étape 1 ignorée : le tableau de bord la rappelle tant qu'elle n'est pas complétée.
+router.post('/espace/identite/ignorer', async (req: Request, res: Response) => {
+  req.siteUser!.onboarding.identitySkipped = true;
+  await req.siteUser!.save();
+  res.redirect('/espace');
+});
+
 // N'importe quel assuré du foyer : conjoint, enfant.
 router.get('/espace/assures/:uid/piece', showIdentity);
-router.post('/espace/assures/:uid/piece/deposer', upload.single('document'), verifyUploadCsrf,
+router.post('/espace/assures/:uid/piece/deposer', uploadIdentity, verifyUploadCsrf,
   depositIdentityDocument);
 router.get('/espace/assures/:uid/piece/:side(recto|verso)', serveIdentityDocument);
 router.post('/espace/assures/:uid/piece/:side(recto|verso)/supprimer', removeIdentityDocument);
@@ -892,6 +987,7 @@ router.get('/espace/assures/nouveau', async (req: Request, res: Response) => {
 router.post('/espace/assures/nouveau', async (req: Request, res: Response) => {
   const user = req.siteUser!;
   const values = fieldValues(req.body, CLIENT_FIELDS);
+  const wasOnboarding = user.onboarding.active;
 
   const fail = (error: string, status = 400, invalidFields: string[] = []) =>
     res.status(status).type('html').send(
@@ -913,6 +1009,13 @@ router.post('/espace/assures/nouveau', async (req: Request, res: Response) => {
       return fail(PHONE_REQUIRED_MESSAGE, 400, ['phone']);
     }
     await Client.create({ ...payload.values, userUid: user.uid });
+    // Étape 3 (facultative) du parcours de mise en route : ajouter un
+    // assuré la termine, qu'elle ait été atteinte par le parcours ou non.
+    if (wasOnboarding) {
+      user.onboarding.active = false;
+      await user.save();
+      return res.redirect('/espace?msg=pret');
+    }
     res.redirect('/espace/assures?msg=ok');
   } catch (err) {
     console.error('Erreur de création d\'assuré (site):', err);
@@ -1255,8 +1358,16 @@ router.get('/espace/assurances/nouvelle', async (req: Request, res: Response) =>
       clientUid: String(req.query.assure || '') || onlyInsured(insured)
     },
     insuredOptions: insured,
-    catalogue: await householdCatalogue(user.uid)
+    catalogue: await householdCatalogue(user.uid),
+    firstInsurance: user.onboarding.active && !await Insurance.exists({ userUid: user.uid })
   }));
+});
+
+// Étape 2 ignorée : le tableau de bord la rappelle tant qu'aucun contrat n'existe.
+router.post('/espace/assurances/nouvelle/ignorer', async (req: Request, res: Response) => {
+  req.siteUser!.onboarding.insuranceSkipped = true;
+  await req.siteUser!.save();
+  res.redirect('/espace');
 });
 
 router.post('/espace/assurances/nouvelle', async (req: Request, res: Response) => {
@@ -1264,6 +1375,7 @@ router.post('/espace/assurances/nouvelle', async (req: Request, res: Response) =
   const values = fieldValues(req.body, INSURANCE_FIELDS);
   values.autoRenew = req.body.autoRenew === 'true';
   values.employerAccidentCoverage = req.body.employerAccidentCoverage === 'true';
+  const wasOnboardingStep = user.onboarding.active && !await Insurance.exists({ userUid: user.uid });
 
   const fail = async (error: string, status = 400, invalidFields: string[] = []) =>
     res.status(status).type('html').send(views.renderInsuranceForm({
@@ -1272,6 +1384,7 @@ router.post('/espace/assurances/nouvelle', async (req: Request, res: Response) =
       values,
       insuredOptions: await insuredOptions(user.uid),
       catalogue: await householdCatalogue(user.uid),
+      firstInsurance: wasOnboardingStep,
       error,
       invalidFields
     }));
@@ -1309,6 +1422,10 @@ router.post('/espace/assurances/nouvelle', async (req: Request, res: Response) =
       insurerId: Number.parseInt(String(body.lamalInsurerId ?? ''), 10) || undefined,
       userUid: user.uid
     });
+    if (wasOnboardingStep) {
+      // Retour à /espace, qui renvoie vers l'étape suivante encore en attente.
+      return res.redirect('/espace');
+    }
     res.redirect('/espace/assurances?msg=ok');
   } catch (err) {
     console.error('Erreur de création de contrat (site):', err);
@@ -1341,6 +1458,7 @@ router.post('/espace/assurances/importer', upload.single('document'), verifyUplo
     // formulaire retombe sur la saisie libre et l'assuré perd les listes de
     // caisses et de modèles qu'il avait sous les yeux une seconde plus tôt.
     const catalogue = await householdCatalogue(user.uid);
+    const firstInsurance = user.onboarding.active && !await Insurance.exists({ userUid: user.uid });
 
     const render = async (values: Values, extra: { error?: string; info?: string; warnings?: string[] } = {}) =>
       res.type('html').send(views.renderInsuranceForm({
@@ -1349,6 +1467,7 @@ router.post('/espace/assurances/importer', upload.single('document'), verifyUplo
         values,
         insuredOptions: await insuredOptions(user.uid),
         catalogue,
+        firstInsurance,
         ...extra
       }));
 

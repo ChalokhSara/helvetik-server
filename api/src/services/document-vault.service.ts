@@ -38,8 +38,12 @@ const ALGORITHM = 'aes-256-gcm';
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
 
-/** Une photo de pièce d'identité dépasse rarement quelques mégaoctets. */
-export const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
+/**
+ * Un scan en PDF peut peser une dizaine de mégaoctets ; les photos, elles,
+ * sont réduites dans le navigateur avant l'envoi. Plafond gardé sous la
+ * limite de 16 Mo d'un document MongoDB, où la pièce chiffrée est stockée.
+ */
+export const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
 
 /** Formats acceptés : ce qui sort d'un téléphone, ou un scan. */
 const ACCEPTED_MIMETYPES = /^(image\/(jpeg|png|webp|heic|heif)|application\/pdf)$/i;

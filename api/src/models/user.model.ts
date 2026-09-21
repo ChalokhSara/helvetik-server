@@ -15,6 +15,21 @@ export interface IUser extends Document {
   /** Empreinte du jeton de confirmation : le jeton en clair ne vit que dans l'email. */
   emailTokenHash?: string;
   emailTokenExpiresAt?: Date;
+  /**
+   * Parcours de mise en route affiché après l'inscription (pièce d'identité,
+   * première assurance, autres assurés) : redirige /espace vers l'étape en
+   * cours tant qu'il est actif. `active` par défaut à `false` pour ne pas
+   * ressusciter ce parcours chez les comptes créés avant son existence — seule
+   * l'inscription l'active explicitement. Il se désactive de lui-même une fois
+   * les trois étapes traversées (complétées ou ignorées) ; les étapes ignorées
+   * reviennent en rappel sur le tableau de bord tant qu'elles ne sont pas
+   * complétées, à travers ses cartes existantes (identité, LAMal).
+   */
+  onboarding: {
+    active: boolean;
+    identitySkipped: boolean;
+    insuranceSkipped: boolean;
+  };
 }
 
 const userSchema = new Schema<IUser>({
@@ -79,6 +94,11 @@ const userSchema = new Schema<IUser>({
   emailTokenExpiresAt: {
     type: Date,
     select: false
+  },
+  onboarding: {
+    active: { type: Boolean, required: true, default: false },
+    identitySkipped: { type: Boolean, required: true, default: false },
+    insuranceSkipped: { type: Boolean, required: true, default: false }
   }
 }, {
   collection: 'md_user'

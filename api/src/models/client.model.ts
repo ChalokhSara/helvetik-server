@@ -24,7 +24,8 @@ export interface IClient extends Document {
   location: string;
   canton: Canton;
   nationality?: string;
-  avsNum: string;
+  /** Facultatif à l'inscription : redemandé à la souscription d'une police, où il sert vraiment. */
+  avsNum?: string;
   sexe?: Sexe;
   blocked: boolean;
   blockedAt?: Date;
@@ -98,10 +99,10 @@ const clientSchema = new Schema<IClient>({
     type: String,
     trim: true
   },
-  // Numéro AVS suisse : 756.XXXX.XXXX.XX
+  // Numéro AVS suisse : 756.XXXX.XXXX.XX. Facultatif — non demandé à
+  // l'inscription, complété plus tard (souscription, pièce d'identité).
   avsNum: {
     type: String,
-    required: [true, 'Le numéro AVS est obligatoire.'],
     trim: true,
     match: [/^756\.\d{4}\.\d{4}\.\d{2}$/, 'Le numéro AVS doit être au format 756.XXXX.XXXX.XX.']
   },
