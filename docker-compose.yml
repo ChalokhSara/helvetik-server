@@ -103,6 +103,14 @@ services:
     profiles: ["DEV"]
     ports:
       - "${API_PORT:-3000}:3000"
+    volumes:
+      - tessdata:/app/.tessdata
+      # Code source monté en direct : nodemon (ci-dessous) redémarre le
+      # processus Node à chaque modification, sans reconstruire l'image ni
+      # relancer le conteneur.
+      - ./api/src:/app/src
+      - ./api/public:/app/public
+    command: npm run dev
     environment:
       <<: *api-env
       NODE_ENV: development

@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
+import path from 'path';
 import session from 'express-session';
 import MongoStore from 'connect-mongo';
 import swaggerUi from 'swagger-ui-express';
@@ -51,6 +52,7 @@ if (process.env.TRUST_PROXY) {
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Session (console d'administration desktop), persistée dans MongoDB pour
 // survivre aux redémarrages. Expiration à une semaine, glissante.

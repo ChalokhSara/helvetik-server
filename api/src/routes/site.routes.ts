@@ -235,11 +235,20 @@ async function withDeducedCanton(body: Record<string, unknown>): Promise<Record<
 
 // ------------------------------------------------------------------ accueil
 
+const loginNotices: Record<string, string> = {
+  deconnecte: 'Vous êtes déconnecté.',
+  confirme: 'Adresse confirmée : vous pouvez vous connecter.',
+  cree: 'Compte créé. Connectez-vous pour accéder à votre espace.'
+};
+
 router.get('/', async (req: Request, res: Response) => {
   if (await currentUser(req)) {
     return res.redirect('/espace');
   }
-  res.type('html').send(views.renderLanding());
+  res.type('html').send(views.renderLanding({
+    csrf: csrfToken(req),
+    notice: loginNotices[String(req.query.msg || '')]
+  }));
 });
 
 // --------------------------------------------------------------- connexion
@@ -248,14 +257,9 @@ router.get('/connexion', async (req: Request, res: Response) => {
   if (await currentUser(req)) {
     return res.redirect('/espace');
   }
-  const notices: Record<string, string> = {
-    deconnecte: 'Vous êtes déconnecté.',
-    confirme: 'Adresse confirmée : vous pouvez vous connecter.',
-    cree: 'Compte créé. Connectez-vous pour accéder à votre espace.'
-  };
-  res.type('html').send(views.renderLogin({
+  res.type('html').send(views.renderLanding({
     csrf: csrfToken(req),
-    notice: notices[String(req.query.msg || '')]
+    notice: loginNotices[String(req.query.msg || '')]
   }));
 });
 
@@ -265,7 +269,7 @@ router.post('/connexion', async (req: Request, res: Response) => {
 
   const fail = (error: string, status = 401) =>
     res.status(status).type('html').send(
-      views.renderLogin({ csrf: csrfToken(req), email, error })
+      views.renderLanding({ csrf: csrfToken(req), email, error })
     );
 
   try {

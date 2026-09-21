@@ -10,10 +10,12 @@ import {
   csrfField,
   escapeHtml,
   formatDate,
+  logoPicture,
   messages,
   money,
   sitePage,
   siteCardPage,
+  siteSplashPage,
   toDateInputValue
 } from './layout';
 import {
@@ -47,45 +49,25 @@ function invalidAttr(fields?: string[]): string {
 
 // ---------------------------------------------------------------- accueil
 
-export function renderLanding(): string {
-  return sitePage('Helvetik — vos assurances, au clair', {}, `    <div class="card" style="text-align:center">
-      <h1>Vos assurances, au clair</h1>
-      <p class="lead">Rassemblez les contrats de toute votre famille, recevez un rappel avant
-      chaque échéance de résiliation, et comparez votre prime d'assurance maladie aux
-      tarifs officiels de l'OFSP.</p>
-      <div class="actions" style="justify-content:center">
-        <a class="btn" href="/inscription">Créer mon compte</a>
-        <a class="btn btn-ghost" href="/connexion">J'ai déjà un compte</a>
-      </div>
-    </div>
-
-    <div class="stats">
-      <div class="card"><h2>Toute la famille</h2><p class="muted">Un compte, autant d'assurés que
-      nécessaire : conjoint, enfants, chacun avec ses contrats.</p></div>
-      <div class="card"><h2>Plus d'échéance ratée</h2><p class="muted">Un rappel par email 90, 30
-      et 7 jours avant la date limite de résiliation.</p></div>
-      <div class="card"><h2>Primes officielles</h2><p class="muted">La comparaison s'appuie sur les
-      tarifs publiés par l'Office fédéral de la santé publique.</p></div>
-    </div>`);
-}
-
-// ------------------------------------------------------------------- auth
-
-export function renderLogin(options: { csrf: string; email?: string; error?: string; notice?: string }): string {
-  return siteCardPage('Helvetik — Connexion', `      <h1>Se connecter</h1>
+export function renderLanding(options: { csrf: string; email?: string; error?: string; notice?: string }): string {
+  return siteSplashPage('Helvetik — vos assurances, au clair', `    <div class="splash-card">
+      ${logoPicture('splash-logo')}
 ${messages(options)}
-      <form method="post" action="/connexion" class="card">
-        ${csrfField(options.csrf)}
-        <label for="email">Email</label>
-        <input id="email" name="email" type="email" value="${escapeHtml(options.email || '')}" autocomplete="email" autofocus required>
+      <div class="splash-actions">
+        <form method="post" action="/connexion">
+          ${csrfField(options.csrf)}
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" value="${escapeHtml(options.email || '')}" autocomplete="email" autofocus required>
 
-        <label for="password">Mot de passe</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
+          <label for="password">Mot de passe</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
 
-        <button type="submit">Se connecter</button>
-      </form>
-      <p class="muted" style="text-align:center">Pas encore de compte ?
-      <a href="/inscription">Créer un compte</a></p>`);
+          <button type="submit">Se connecter</button>
+        </form>
+        <a class="link" href="/mot-de-passe-oublie">Mot de passe oublié ?</a>
+        <a class="btn btn-ghost splash-secondary" href="/inscription">Créer un compte</a>
+      </div>
+    </div>`);
 }
 
 export function renderRegister(options: {

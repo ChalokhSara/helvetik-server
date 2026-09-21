@@ -7,6 +7,18 @@
  * mobile, avec les mêmes données et les mêmes règles.
  */
 
+/**
+ * Logo Helvetik, avec le mot-symbole en blanc plutôt qu'en bleu marine
+ * lorsque la page est affichée en thème sombre — sans quoi il devient
+ * illisible sur le fond sombre.
+ */
+export function logoPicture(className: string): string {
+  return `<picture>
+        <source srcset="/logo-dark.png" media="(prefers-color-scheme: dark)">
+        <img class="${className}" src="/logo.png" alt="Helvetik">
+      </picture>`;
+}
+
 export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -85,6 +97,7 @@ const STYLES = `
     font-weight: 700; font-size: 1.15rem; color: var(--ink); text-decoration: none;
   }
   .brand span { color: var(--brand); }
+  .brand-logo { height: 2.5rem; display: block; }
   .topbar .who { font-size: .85rem; color: var(--muted); }
   .topbar .who a { margin-left: .6rem; }
 
@@ -104,6 +117,43 @@ const STYLES = `
   nav.tabs a.active { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
 
   main { max-width: 960px; margin: 0 auto; padding: 1.25rem 1rem 4rem; }
+
+  /* --- accueil / écran de lancement --- */
+  main.splash {
+    max-width: none;
+    min-height: 100dvh;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+    padding: max(3.5rem, 10dvh) 1.25rem 3rem;
+    padding-top: max(calc(3.5rem + env(safe-area-inset-top, 0px)), 10dvh);
+    text-align: center;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.55) 0%, rgba(245,246,248,.92) 60%, var(--bg) 100%),
+      url('/chalet-bg.jpg') center/cover no-repeat;
+  }
+  @media (prefers-color-scheme: dark) {
+    main.splash {
+      background:
+        linear-gradient(180deg, rgba(15,17,21,.35) 0%, rgba(15,17,21,.85) 60%, var(--bg) 100%),
+        url('/chalet-bg.jpg') center/cover no-repeat;
+    }
+  }
+  .splash-card {
+    background: color-mix(in srgb, var(--surface) 82%, transparent);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    box-shadow: 0 20px 45px -18px rgba(15, 17, 21, .35);
+    padding: 2rem 2rem 2.25rem;
+    width: 100%; max-width: 420px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .splash-logo { width: min(360px, 82vw); height: auto; margin-bottom: 1.25rem; }
+  .splash-actions { display: flex; flex-direction: column; align-items: center; gap: .9rem; width: 100%; }
+  .splash-actions .btn { width: 100%; }
+  .splash-actions .link { color: var(--muted); text-decoration: none; font-size: .88rem; }
+  .splash-actions .link:hover { text-decoration: underline; }
+  .splash-actions .btn.splash-secondary { margin-top: 1rem; }
   h1 { font-size: 1.4rem; margin: 0 0 1rem; }
   h2 { font-size: 1.1rem; margin: 0 0 .75rem; }
   p.lead { color: var(--muted); margin-top: -.5rem; }
@@ -460,7 +510,7 @@ function tabs(active?: string): string {
 export function sitePage(title: string, ctx: SiteContext, body: string): string {
   const account = ctx.email
     ? `<span class="who">${escapeHtml(ctx.email)}<a href="/deconnexion">Se déconnecter</a></span>`
-    : '<span class="who"><a href="/connexion">Se connecter</a></span>';
+    : '<span class="who"><a class="btn" href="/connexion">Se connecter</a></span>';
 
   return `<!DOCTYPE html>
 <html lang="fr">
@@ -474,7 +524,7 @@ export function sitePage(title: string, ctx: SiteContext, body: string): string 
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="${ctx.email ? '/espace' : '/'}">Helvetik<span>.</span></a>
+    <a class="brand" href="${ctx.email ? '/espace' : '/'}">${logoPicture('brand-logo')}</a>
     ${account}
   </header>
 ${tabs(ctx.active)}
@@ -489,6 +539,26 @@ ${body}
       if (message && !window.confirm(message)) { event.preventDefault(); }
     });
   </script>
+</body>
+</html>`;
+}
+
+/** Écran plein cadre sans topbar ni onglets, pour l'accueil style application mobile. */
+export function siteSplashPage(title: string, body: string): string {
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Helvetik — suivez vos assurances et comparez vos primes d'assurance maladie.">
+  <title>${escapeHtml(title)}</title>
+  <style>${STYLES}</style>
+</head>
+<body>
+  <main class="splash">
+${body}
+  </main>
 </body>
 </html>`;
 }
