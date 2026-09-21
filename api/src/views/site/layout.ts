@@ -144,11 +144,11 @@ const STYLES = `
     border: 1px solid var(--line);
     border-radius: 20px;
     box-shadow: 0 20px 45px -18px rgba(15, 17, 21, .35);
-    padding: 2rem 2rem 2.25rem;
-    width: 100%; max-width: 420px;
+    padding: 2rem 1.75rem 2rem;
+    width: 100%; max-width: 360px;
     display: flex; flex-direction: column; align-items: center;
   }
-  .splash-logo { width: min(360px, 82vw); height: auto; margin-bottom: 1.25rem; }
+  .splash-logo { width: min(230px, 60vw); height: auto; margin-bottom: 1.5rem; }
   .splash-actions { display: flex; flex-direction: column; align-items: center; gap: .9rem; width: 100%; }
   .splash-actions .btn { width: 100%; }
   .splash-actions .link { color: var(--muted); text-decoration: none; font-size: .88rem; }
