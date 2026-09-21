@@ -897,6 +897,33 @@ export interface ChangeDispatch {
 }
 
 /**
+ * Mode d'envoi des lettres de résiliation et d'affiliation.
+ *
+ * Choisi avant tout le reste : lui seul décide si l'assuré doit encore
+ * répondre au questionnaire (uniquement s'il s'en charge lui-même) et s'il
+ * verra les lettres sur cette page ou si Helvetik s'en occupe.
+ */
+export const DELIVERY_METHODS = ['DIGITAL', 'B_POST', 'A_POST', 'REGISTERED', 'SELF'] as const;
+export type DeliveryMethod = typeof DELIVERY_METHODS[number];
+
+export const DELIVERY_LABELS: Record<DeliveryMethod, string> = {
+  DIGITAL: 'Numérique',
+  B_POST: 'Courrier B',
+  A_POST: 'Courrier A',
+  REGISTERED: 'Recommandé',
+  SELF: 'Je le fais moi-même'
+};
+
+/** En francs, 0 pour l'envoi que l'assuré fait lui-même. */
+export const DELIVERY_PRICES: Record<DeliveryMethod, number> = {
+  DIGITAL: 5,
+  B_POST: 8,
+  A_POST: 9,
+  REGISTERED: 20,
+  SELF: 0
+};
+
+/**
  * Page du changement de caisse.
  *
  * Elle remplace l'ancien message d'indisponibilité. Le service consiste à
@@ -913,32 +940,17 @@ export function renderChange(o: {
   csrf: string;
   effectiveYear: number;
   deadline: Date;
-  candidates: ChangeCandidate[];
   hasSignature: boolean;
-  /**
-   * L'assuré a-t-il déjà donné son avis ?
-   *
-   * Les lettres ne sont produites qu'ensuite. Le service est jeune : sans
-   * retour de ceux qui s'en servent, il se construirait à l'aveugle. Quelques
-   * questions contre deux courriers prêts à poster, c'est un échange honnête,
-   * et il n'est demandé qu'une fois.
-   */
-  hasFeedback: boolean;
-  /**
-   * Envoi par ePost, quand l'exploitant l'a active.
-   *
-   * Le mode figure dans l'interface et non seulement dans la configuration :
-   * un assure qui clique doit savoir si sa lettre part reellement ou si le
-   * service se contente d'en chiffrer le cout.
-   */
-  epost?: { enabled: boolean; mode: 'PREVIEW' | 'LIVE' };
   savings?: { monthly: number; yearly: number } | null;
-  /** Choix de caisse fait sur la comparaison, à reporter sur les lettres. */
+  /** Choix de caisse fait sur la comparaison, à reporter jusqu'aux lettres. */
   query?: string;
   notice?: string;
   error?: string;
 }): string {
   const deadlinePassed = o.deadline.getTime() < Date.now();
+  const hiddenQuery = Array.from(new URLSearchParams(o.query || ''))
+    .map(([k, v]) => `        <input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`)
+    .join('\n');
 
   const savings = o.savings && o.savings.monthly > 0
     ? `    <p class="stats-caption">Vous économisez</p>
@@ -950,15 +962,12 @@ export function renderChange(o: {
     </div>`
     : '';
 
-  // Le questionnaire ouvre l'accès aux lettres : il passe donc en premier,
-  // avant même la signature.
-  const survey = o.hasFeedback
-    ? ''
-    : `    <div class="card">
+  // Le clic sur « Souscrire » mène au choix du mode d'envoi, sur sa propre
+  // page : cette carte ne fait que recueillir le consentement.
+  const consentCard = `    <div class="card">
       <h2>Souscrire ma nouvelle assurance et résilier l'ancienne</h2>
-      <form method="get" action="/espace/souscription">
-${Array.from(new URLSearchParams(o.query || '')).map(([k, v]) =>
-        `        <input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`).join('\n')}
+      <form method="get" action="/espace/changement/envoi">
+${hiddenQuery}
         <div class="check">
           <input type="checkbox" id="consent-impaye" name="consent" value="1" required>
           <label for="consent-impaye">Je comprends que tant que j'ai des primes impayées, des
@@ -973,7 +982,8 @@ ${Array.from(new URLSearchParams(o.query || '')).map(([k, v]) =>
       </form>
     </div>`;
 
-  // La signature conditionne toutes les lettres : elle vient ensuite.
+  // La signature reste ici : elle vaut pour tout le dossier, quel que soit
+  // le mode d'envoi choisi ensuite.
   const signature = o.hasSignature
     ? `    <div class="card">
       <h2>Votre signature</h2>
@@ -1000,8 +1010,224 @@ ${deadlinePassed
       pouvez tout de même préparer vos courriers pour l'an prochain.</p>`
       : ''}
 ${savings}
-${survey}
+${consentCard}
 ${signature}`);
+}
+
+/**
+ * Étape suivante, sur sa propre page : le mode d'envoi des lettres, puis —
+ * selon le choix — le questionnaire (une fois, pour qui s'en charge
+ * lui-même) et les lettres, ou une confirmation pour les envois confiés
+ * à Helvetik.
+ */
+export function renderDeliverySelection(o: {
+  email: string;
+  csrf: string;
+  candidates: ChangeCandidate[];
+  hasSignature: boolean;
+  /**
+   * L'assuré a-t-il déjà donné son avis ?
+   *
+   * Question posée seulement à qui envoie ses lettres lui-même : c'est le
+   * seul cas où Helvetik ne touche jamais le dossier, et donc le seul où
+   * quelques questions contre deux courriers prêts à poster reste un échange
+   * honnête. Demandé une fois.
+   */
+  hasFeedback: boolean;
+  /** Mode d'envoi choisi, s'il l'a déjà été. */
+  delivery?: DeliveryMethod;
+  /**
+   * Envoi par ePost, quand l'exploitant l'a active.
+   *
+   * Le mode figure dans l'interface et non seulement dans la configuration :
+   * un assure qui clique doit savoir si sa lettre part reellement ou si le
+   * service se contente d'en chiffrer le cout.
+   */
+  epost?: { enabled: boolean; mode: 'PREVIEW' | 'LIVE' };
+  /** Choix de caisse fait sur la comparaison, à reporter jusqu'aux lettres. */
+  query?: string;
+  notice?: string;
+  error?: string;
+}): string {
+  const suffix = o.query ? `?${o.query}` : '';
+  const hiddenQuery = Array.from(new URLSearchParams(o.query || ''))
+    .map(([k, v]) => `        <input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`)
+    .join('\n');
+
+  const deliveryChoice = (method: DeliveryMethod) => `        <div class="check">
+          <input type="radio" id="delivery-${method}" name="delivery" value="${method}"${
+    o.delivery === method ? ' checked' : ''} required>
+          <label for="delivery-${method}">${DELIVERY_LABELS[method]} — ${
+    DELIVERY_PRICES[method] > 0 ? money(DELIVERY_PRICES[method]) : 'Gratuit'}</label>
+        </div>`;
+
+  const deliverySelector = `    <div class="card">
+      <p class="muted">Ce choix ne change rien à votre contrat : il ne décide que de la
+      façon dont la résiliation et l'affiliation partent vers les caisses.</p>
+      <form method="get" action="/espace/changement/envoi">
+${hiddenQuery}
+${DELIVERY_METHODS.map(deliveryChoice).join('\n')}
+        <div class="actions"><button type="submit" class="btn">Continuer</button></div>
+      </form>
+    </div>`;
+
+  // Le questionnaire n'a de sens que pour qui envoie ses lettres lui-même :
+  // dans les autres cas, Helvetik s'en charge et il n'y a rien à demander.
+  const survey = o.delivery === 'SELF' && !o.hasFeedback
+    ? `    <div class="card">
+      <h2>Encore une chose avant vos lettres</h2>
+      <p>Helvetik est jeune et se construit avec ceux qui l'utilisent. Avant de
+      produire vos courriers, dites-nous ce que vous attendez du service : trois
+      minutes, une seule fois.</p>
+      <div class="actions">
+        <a class="btn" href="/espace/souscription${o.query ? `?${o.query}&delivery=SELF` : '?delivery=SELF'}">
+          Répondre au questionnaire</a>
+      </div>
+    </div>`
+    : '';
+
+  // Envoi par ePost. Deux boutons distincts plutôt qu'un seul : les deux
+  // courriers ne partent pas au même destinataire, et l'assuré peut vouloir
+  // poster la résiliation tout en gardant l'affiliation sous la main.
+  const sending = (candidate: ChangeCandidate) => {
+    if (!o.epost?.enabled) {
+      return '';
+    }
+    const live = o.epost.mode === 'LIVE';
+    const form = (path: string, label: string) =>
+      `          <form method="post" action="/espace/changement/${
+        escapeHtml(candidate.clientUid)}/${path}/envoyer" style="display:inline">
+            <input type="hidden" name="_csrf" value="${escapeHtml(o.csrf)}">
+            <input type="hidden" name="query" value="${escapeHtml(o.query || '')}">
+            <button class="btn btn-ghost" type="submit"${live
+              // L'apostrophe de « l'affiliation » fermerait la chaîne JavaScript
+              // au milieu de l'attribut : la confirmation ne s'afficherait plus,
+              // et le courrier partirait sans que personne n'ait confirmé.
+              ? ` onclick="return confirm('Envoyer réellement ${
+                label.replace(/['\\]/g, '\\$&')} en recommandé ? Une résiliation postée ne se reprend pas.')"`
+              : ''}>${live ? 'Poster' : 'Estimer l\'envoi'} — ${label}</button>
+          </form>`;
+
+    return `        <p class="muted" style="margin:.6rem 0 .2rem">${live
+      ? '<strong>Envoi réel.</strong> Le courrier part en recommandé, à vos frais.'
+      : '<strong>Mode aperçu.</strong> Rien ne part : ePost annonce seulement le prix et les canaux disponibles.'}</p>
+        <div class="actions">
+${form('resiliation', 'la résiliation')}
+${form('affiliation', 'l\'affiliation')}
+        </div>
+`;
+  };
+
+  // Ce qui est déjà parti. Sans cette trace, un assuré qui doute renverrait la
+  // même résiliation, et une caisse recevant deux courriers contradictoires
+  // s'en tient au premier.
+  const history = (candidate: ChangeCandidate) => {
+    if (!candidate.dispatches.length) {
+      return '';
+    }
+    const line = (d: ChangeDispatch) => {
+      const what = d.kind === 'CANCELLATION' ? 'Résiliation' : 'Affiliation';
+      const when = formatDate(d.sentAt);
+      if (d.error) {
+        return `<li>${what} · ${when} · <span class="err">échec : ${escapeHtml(d.error)}</span></li>`;
+      }
+      const cost = d.price !== undefined ? ` · ${money(d.price)}` : '';
+      return d.mode === 'LIVE'
+        ? `<li>${what} · <strong>postée le ${when}</strong>${cost}${
+          d.status ? ` · ${escapeHtml(d.status)}` : ''}</li>`
+        : `<li>${what} · aperçu du ${when}${cost} · <span class="muted">rien n'a été envoyé</span></li>`;
+    };
+    return `        <ul class="muted" style="margin:.4rem 0 0;padding-left:1.1rem">
+${candidate.dispatches.map(line).map((l) => '          ' + l).join('\n')}
+        </ul>
+`;
+  };
+
+  const row = (candidate: ChangeCandidate) => {
+    // Déjà au meilleur tarif : proposer de résilier pour se réaffilier à la
+    // même caisse, au même modèle, serait absurde — et coûterait à l'assuré
+    // des recommandés pour rien.
+    if (candidate.alreadyOptimal) {
+      return `      <div class="card">
+        <h2>${escapeHtml(candidate.name)}</h2>
+        <p class="msg ok">Déjà au meilleur tarif : ${
+        candidate.currentInsurer ? escapeHtml(candidate.currentInsurer) : 'sa caisse actuelle'}${
+        candidate.targetModel ? ` — ${escapeHtml(candidate.targetModel)}` : ''
+      } est l'offre la moins chère de sa région pour ses critères. Aucune lettre à envoyer.</p>
+      </div>`;
+    }
+
+    const missing: string[] = [];
+    if (!o.hasSignature) {
+      missing.push('votre signature');
+    }
+    if (candidate.identityKinds.length < 2) {
+      missing.push('les deux faces de la pièce d\'identité');
+    }
+    if (!candidate.hasContract) {
+      missing.push('le contrat actuel, pour son numéro de police');
+    }
+
+    const target = candidate.targetInsurer
+      ? `<strong>${escapeHtml(candidate.targetInsurer)}</strong>${
+        candidate.targetModel ? ` — ${escapeHtml(candidate.targetModel)}` : ''}`
+      : '<span class="muted">à choisir dans la comparaison</span>';
+
+    const letters = missing.length
+      ? `        <p class="msg warn">Avant de produire les lettres, il manque ${
+        escapeHtml(missing.join(', '))}.</p>
+        <div class="actions">
+          ${candidate.identityKinds.length < 2
+            ? `<a class="btn btn-ghost" href="/espace/assures/${escapeHtml(candidate.clientUid)}/piece">Déposer la pièce</a>`
+            : ''}
+          ${!candidate.hasContract
+            ? '<a class="btn btn-ghost" href="/espace/assurances/nouvelle">Ajouter le contrat</a>'
+            : ''}
+        </div>`
+      : `        <div class="actions">
+          <a class="btn" href="/espace/changement/${escapeHtml(candidate.clientUid)}/resiliation${suffix}">
+            Lettre de résiliation</a>
+          <a class="btn" href="/espace/changement/${escapeHtml(candidate.clientUid)}/affiliation${suffix}">
+            Lettre d'affiliation</a>
+        </div>
+${sending(candidate)}${history(candidate)}`;
+
+    return `      <div class="card">
+        <h2>${escapeHtml(candidate.name)}</h2>
+        <p>Quitte ${candidate.currentInsurer
+          ? `<strong>${escapeHtml(candidate.currentInsurer)}</strong>`
+          : '<span class="muted">caisse actuelle inconnue</span>'}${
+        candidate.policyNumber ? ` (police ${escapeHtml(candidate.policyNumber)})` : ''}
+        pour ${target}.</p>
+        ${candidate.franchise !== undefined
+          ? `<p class="muted">Franchise ${candidate.franchise} CHF${
+            candidate.monthlySaving ? ` · ${money(candidate.monthlySaving)} d'économie par mois` : ''}.</p>`
+          : ''}
+${letters}
+      </div>`;
+  };
+
+  let content = deliverySelector;
+  if (o.delivery === 'SELF') {
+    content = `${survey}
+${o.hasFeedback
+      ? (o.candidates.length
+        ? o.candidates.map(row).join('\n')
+        : '    <div class="card"><p class="empty">Aucun assuré à faire changer de caisse.</p></div>')
+      : ''}`;
+  } else if (o.delivery) {
+    content = `    <div class="card">
+      <h2>${DELIVERY_LABELS[o.delivery]} — ${money(DELIVERY_PRICES[o.delivery])}</h2>
+      <p>Votre choix est enregistré. Le paiement en ligne n'est pas encore disponible :
+      nous vous contacterons pour finaliser l'envoi de vos lettres.</p>
+    </div>`;
+  }
+
+  return sitePage('Helvetik — Sélectionner un type d\'envoi', { email: o.email, active: 'optimisation' },
+    `${backLink(`/espace/changement${suffix}`, 'Changer de caisse')}
+    <h1>Sélectionner un type d'envoi</h1>
+${messages({ notice: o.notice, error: o.error })}
+${content}`);
 }
 
 /** Page de recueil de la signature. */
@@ -1055,7 +1281,7 @@ export function renderSubscription(o: {
   savings?: { monthly: number; yearly: number } | null;
   strategy?: string;
   /** Caisse retenue sur la comparaison, à reconduire après le questionnaire. */
-  picked?: { insurerId?: string; tariffCode?: string; option?: string };
+  picked?: { insurerId?: string; tariffCode?: string; option?: string; delivery?: string; consent?: string };
   error?: string;
   invalid?: string[];
 }): string {
@@ -1101,6 +1327,8 @@ ${recap}
       ${o.picked?.insurerId ? `<input type="hidden" name="caisse" value="${escapeHtml(o.picked.insurerId)}">` : ''}
       ${o.picked?.tariffCode ? `<input type="hidden" name="modele" value="${escapeHtml(o.picked.tariffCode)}">` : ''}
       ${o.picked?.option ? `<input type="hidden" name="option" value="${escapeHtml(o.picked.option)}">` : ''}
+      ${o.picked?.delivery ? `<input type="hidden" name="delivery" value="${escapeHtml(o.picked.delivery)}">` : ''}
+      ${o.picked?.consent ? `<input type="hidden" name="consent" value="${escapeHtml(o.picked.consent)}">` : ''}
 ${errorSummary()}
       <div class="card">
         <h2>Votre avis nous est utile</h2>

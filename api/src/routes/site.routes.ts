@@ -1991,115 +1991,168 @@ router.post('/espace/signature/supprimer', async (req: Request, res: Response) =
  * choisie sur la page d'optimisation : regrouper le foyer chez une caisse, ou
  * placer chacun là où il est le moins cher.
  */
-router.get('/espace/changement', async (req: Request, res: Response) => {
+/**
+ * Rassemble ce que les deux pages du changement de caisse ont en commun :
+ * les assurés à faire changer, la comparaison et le choix de caisse porté
+ * par l'URL. Partagé pour que les deux pages ne puissent pas diverger sur
+ * qui est concerné ou sur quelle offre a été retenue.
+ */
+async function loadChangeData(req: Request) {
   const user = req.siteUser!;
+  const [clients, insurances, holder] = await Promise.all([
+    Client.find({ userUid: user.uid }).sort({ birthdate: 1 }),
+    Insurance.find({ userUid: user.uid, type: 'LAMAL', status: 'ACTIVE' }),
+    accountHolder(user.uid)
+  ]);
+
+  const documents = await documentsByClient(clients.map((c) => c.uid));
+  const hasSignature = holder ? await hasDocument(holder.uid, 'SIGNATURE') : false;
+  const hasFeedback = await hasAnsweredSurvey(user.uid);
+
+  // Courriers déjà confiés à ePost. Bornés aux quatre derniers par assuré :
+  // la page dit ce qui est parti, elle n'est pas un journal d'exploitation.
+  const dispatches = new Map<string, views.ChangeDispatch[]>();
+  for (const record of await LetterDispatch.find({ userUid: user.uid })
+    .sort({ sentAt: -1 }).limit(40)) {
+    const list = dispatches.get(record.clientUid) || [];
+    if (list.length < 4) {
+      list.push({
+        kind: record.kind,
+        mode: record.mode,
+        sentAt: record.sentAt,
+        status: record.status,
+        price: record.price,
+        error: record.error
+      });
+    }
+    dispatches.set(record.clientUid, list);
+  }
+
+  // La comparaison n'est pas indispensable pour résilier : on la tente, et
+  // son absence n'empêche pas de produire les lettres.
+  let result: Awaited<ReturnType<typeof optimiseLamal>> = null;
+  try {
+    result = await optimiseLamal(await buildHouseholdContext(user.uid));
+  } catch {
+    result = null;
+  }
+
+  const individual = String(req.query.option || '') === 'individuel';
+
+  // Offre explicitement choisie sur la page de comparaison. Sans elle, la
+  // moins chère fait office de défaut — mais on ne l'impose pas : changer de
+  // caisse pour son service ou son réseau de médecins est une raison aussi
+  // valable que le prix.
+  const pickedInsurer = Number.parseInt(String(req.query.caisse ?? ''), 10);
+  const pickedTariff = String(req.query.modele || '').trim();
+  const picked = Number.isFinite(pickedInsurer)
+    ? result?.offers.find((offer) => offer.insurerId === pickedInsurer &&
+        (!pickedTariff || offer.tariffCode === pickedTariff))
+    : undefined;
+
+  const grouped = picked || result?.offers?.[0];
+
+  const candidates: views.ChangeCandidate[] = clients.map((client) => {
+    const contract = insurances.find((i) => i.clientUid === client.uid);
+    const plan = result?.individual?.plans.find((p) => p.ref === client.uid);
+    // Un choix explicite prime sur tout : c'est celui de l'assuré.
+    const target = picked || (individual && plan ? plan.best : grouped);
+
+    // Même caisse et même modèle qu'aujourd'hui : il n'y a rien à changer.
+    const sameTariff = Boolean(
+      target && contract &&
+      target.insurer === contract.provider &&
+      (!contract.tariffCode || target.tariffCode === contract.tariffCode)
+    );
+
+    return {
+      clientUid: client.uid,
+      name: describeClient(client),
+      currentInsurer: contract?.provider,
+      policyNumber: contract?.policyNumber,
+      targetInsurer: target?.insurer,
+      targetModel: target ? modelLabel(target) : undefined,
+      franchise: contract?.franchise,
+      monthlySaving: plan?.savings.monthly,
+      identityKinds: (documents.get(client.uid) || [])
+        .map((d) => d.kind)
+        .filter((kind) => kind !== 'SIGNATURE'),
+      hasContract: Boolean(contract),
+      alreadyOptimal: sameTariff,
+      dispatches: dispatches.get(client.uid) || []
+    };
+  });
+
+  return {
+    user,
+    hasSignature,
+    hasFeedback,
+    candidates,
+    query: new URLSearchParams({
+      ...(Number.isFinite(pickedInsurer) ? { caisse: String(pickedInsurer) } : {}),
+      ...(pickedTariff ? { modele: pickedTariff } : {}),
+      ...(individual ? { option: 'individuel' } : {})
+    }).toString(),
+    savings: result
+      ? (individual && result.individual ? result.individual.savings : result.potentialSavings)
+      : null
+  };
+}
+
+/**
+ * Dossier de changement, première page : consentement et signature.
+ *
+ * Le mode d'envoi, le questionnaire et les lettres vivent sur la page
+ * suivante (`/espace/changement/envoi`) : celle-ci ne demande que ce qui
+ * vaut pour tout le dossier, quel que soit le mode d'envoi retenu ensuite.
+ */
+router.get('/espace/changement', async (req: Request, res: Response) => {
   const year = targetYear();
 
   try {
-    const [clients, insurances, holder] = await Promise.all([
-      Client.find({ userUid: user.uid }).sort({ birthdate: 1 }),
-      Insurance.find({ userUid: user.uid, type: 'LAMAL', status: 'ACTIVE' }),
-      accountHolder(user.uid)
-    ]);
-
-    const documents = await documentsByClient(clients.map((c) => c.uid));
-    const hasSignature = holder ? await hasDocument(holder.uid, 'SIGNATURE') : false;
-    const hasFeedback = await hasAnsweredSurvey(user.uid);
-
-    // Courriers déjà confiés à ePost. Bornés aux quatre derniers par assuré :
-    // la page dit ce qui est parti, elle n'est pas un journal d'exploitation.
-    const dispatches = new Map<string, views.ChangeDispatch[]>();
-    for (const record of await LetterDispatch.find({ userUid: user.uid })
-      .sort({ sentAt: -1 }).limit(40)) {
-      const list = dispatches.get(record.clientUid) || [];
-      if (list.length < 4) {
-        list.push({
-          kind: record.kind,
-          mode: record.mode,
-          sentAt: record.sentAt,
-          status: record.status,
-          price: record.price,
-          error: record.error
-        });
-      }
-      dispatches.set(record.clientUid, list);
-    }
-
-    // La comparaison n'est pas indispensable pour résilier : on la tente, et
-    // son absence n'empêche pas de produire les lettres.
-    let result: Awaited<ReturnType<typeof optimiseLamal>> = null;
-    try {
-      result = await optimiseLamal(await buildHouseholdContext(user.uid));
-    } catch {
-      result = null;
-    }
-
-    const individual = String(req.query.option || '') === 'individuel';
-
-    // Offre explicitement choisie sur la page de comparaison. Sans elle, la
-    // moins chère fait office de défaut — mais on ne l'impose pas : changer de
-    // caisse pour son service ou son réseau de médecins est une raison aussi
-    // valable que le prix.
-    const pickedInsurer = Number.parseInt(String(req.query.caisse ?? ''), 10);
-    const pickedTariff = String(req.query.modele || '').trim();
-    const picked = Number.isFinite(pickedInsurer)
-      ? result?.offers.find((offer) => offer.insurerId === pickedInsurer &&
-          (!pickedTariff || offer.tariffCode === pickedTariff))
-      : undefined;
-
-    const grouped = picked || result?.offers?.[0];
-
-    const candidates: views.ChangeCandidate[] = clients.map((client) => {
-      const contract = insurances.find((i) => i.clientUid === client.uid);
-      const plan = result?.individual?.plans.find((p) => p.ref === client.uid);
-      // Un choix explicite prime sur tout : c'est celui de l'assuré.
-      const target = picked || (individual && plan ? plan.best : grouped);
-
-      // Même caisse et même modèle qu'aujourd'hui : il n'y a rien à changer.
-      const sameTariff = Boolean(
-        target && contract &&
-        target.insurer === contract.provider &&
-        (!contract.tariffCode || target.tariffCode === contract.tariffCode)
-      );
-
-      return {
-        clientUid: client.uid,
-        name: describeClient(client),
-        currentInsurer: contract?.provider,
-        policyNumber: contract?.policyNumber,
-        targetInsurer: target?.insurer,
-        targetModel: target ? modelLabel(target) : undefined,
-        franchise: contract?.franchise,
-        monthlySaving: plan?.savings.monthly,
-        identityKinds: (documents.get(client.uid) || [])
-          .map((d) => d.kind)
-          .filter((kind) => kind !== 'SIGNATURE'),
-        hasContract: Boolean(contract),
-        alreadyOptimal: sameTariff,
-        dispatches: dispatches.get(client.uid) || []
-      };
-    });
+    const data = await loadChangeData(req);
 
     res.type('html').send(views.renderChange({
-      email: user.email,
+      email: data.user.email,
       csrf: csrfToken(req),
       effectiveYear: year,
       deadline: cancellationDeadlineFor(year),
-      candidates,
-      hasSignature,
-      hasFeedback,
-      epost: { enabled: epostConfig().enabled, mode: epostConfig().mode },
-      // Le choix de caisse voyage tel quel jusqu'aux lettres.
-      query: new URLSearchParams({
-        ...(Number.isFinite(pickedInsurer) ? { caisse: String(pickedInsurer) } : {}),
-        ...(pickedTariff ? { modele: pickedTariff } : {}),
-        ...(individual ? { option: 'individuel' } : {})
-      }).toString(),
-      savings: result
-        ? (individual && result.individual ? result.individual.savings : result.potentialSavings)
-        : null,
+      hasSignature: data.hasSignature,
+      query: data.query,
+      savings: data.savings,
       notice: {
-        signee: 'Signature enregistrée.',
+        signee: 'Signature enregistrée.'
+      }[String(req.query.msg || '')]
+    }));
+  } catch (err) {
+    console.error('Erreur du dossier de changement:', err);
+    res.status(500).type('html').send('Erreur serveur.');
+  }
+});
+
+/**
+ * Deuxième page : le mode d'envoi, puis — selon le choix — le questionnaire
+ * et les lettres, ou une confirmation pour les envois confiés à Helvetik.
+ */
+router.get('/espace/changement/envoi', async (req: Request, res: Response) => {
+  try {
+    const data = await loadChangeData(req);
+
+    const requestedDelivery = String(req.query.delivery || '');
+    const delivery = (views.DELIVERY_METHODS as readonly string[]).includes(requestedDelivery)
+      ? requestedDelivery as views.DeliveryMethod
+      : undefined;
+
+    res.type('html').send(views.renderDeliverySelection({
+      email: data.user.email,
+      csrf: csrfToken(req),
+      candidates: data.candidates,
+      hasSignature: data.hasSignature,
+      hasFeedback: data.hasFeedback,
+      delivery,
+      epost: { enabled: epostConfig().enabled, mode: epostConfig().mode },
+      query: data.query,
+      notice: {
         apercu: 'Aperçu ePost obtenu : le prix et les canaux figurent ci-dessous. '
           + 'Aucun courrier n\'a été envoyé.',
         poste: 'Courrier confié à ePost. Il part en recommandé ; son état apparaît ci-dessous.'
@@ -2113,7 +2166,7 @@ router.get('/espace/changement', async (req: Request, res: Response) => {
       }[String(req.query.err || '')]
     }));
   } catch (err) {
-    console.error('Erreur du dossier de changement:', err);
+    console.error('Erreur du choix d\'envoi:', err);
     res.status(500).type('html').send('Erreur serveur.');
   }
 });
@@ -2285,7 +2338,10 @@ async function sendLetter(req: Request, res: Response, kind: LetterKind) {
     const query = new URLSearchParams(forward);
     const [key, value] = flag.split('=');
     query.set(key, value);
-    return `/espace/changement?${query.toString()}`;
+    // L'envoi n'a lieu que depuis la page du mode d'envoi, en mode « je le
+    // fais moi-même » : c'est là qu'il faut revenir.
+    query.set('delivery', 'SELF');
+    return `/espace/changement/envoi?${query.toString()}`;
   };
 
   if (!config.enabled) {
@@ -2381,7 +2437,9 @@ router.get('/espace/souscription', async (req: Request, res: Response) => {
     picked: {
       insurerId: String(req.query.caisse || '') || undefined,
       tariffCode: String(req.query.modele || '') || undefined,
-      option: String(req.query.option || '') || undefined
+      option: String(req.query.option || '') || undefined,
+      delivery: String(req.query.delivery || '') || undefined,
+      consent: String(req.query.consent || '') || undefined
     },
     savings: context.savings,
     // Le choix fait dans les onglets prime sur la stratégie la plus avantageuse.
@@ -2417,7 +2475,9 @@ router.post('/espace/souscription', async (req: Request, res: Response) => {
       picked: {
         insurerId: String(req.body.caisse || '') || undefined,
         tariffCode: String(req.body.modele || '') || undefined,
-        option: String(req.body.option || '') || undefined
+        option: String(req.body.option || '') || undefined,
+        delivery: String(req.body.delivery || '') || undefined,
+        consent: String(req.body.consent || '') || undefined
       },
       savings: context.savings,
       strategy: values.strategy || context.strategy,
@@ -2453,16 +2513,19 @@ router.post('/espace/souscription', async (req: Request, res: Response) => {
     // Le choix de caisse fait sur la comparaison est reconduit : l'assuré
     // revient exactement là où il en était, sans avoir à le refaire.
     const forward = new URLSearchParams();
-    for (const key of ['caisse', 'modele', 'option']) {
+    for (const key of ['caisse', 'modele', 'option', 'delivery']) {
       const value = String(req.body[key] ?? req.query[key] ?? '').trim();
       if (value) { forward.set(key, value); }
     }
+    // Le questionnaire n'est proposé que depuis le mode « je le fais
+    // moi-même » : les lettres l'attendent forcément là.
+    forward.set('delivery', 'SELF');
 
     res.type('html').send(views.renderSubscriptionThanks({
       email: user.email,
       betaTester: values.betaTester,
       recontact: values.recontact,
-      changeHref: '/espace/changement' + (forward.toString() ? '?' + forward.toString() : '')
+      changeHref: `/espace/changement/envoi?${forward.toString()}`
     }));
   } catch (err) {
     console.error('Erreur d\'enregistrement du retour d\'expérience:', err);
