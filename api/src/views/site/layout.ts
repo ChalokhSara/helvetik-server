@@ -277,8 +277,22 @@ const STYLES = `
     border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
     animation: spin .7s linear infinite;
   }
+  /* Bandeau affiché pendant un traitement long (analyse d'un document). */
+  .busy-status {
+    display: flex; align-items: center; gap: .85rem;
+    margin-top: 1rem; padding: .9rem 1rem; border-radius: 8px;
+    background: var(--info-bg); color: var(--info-ink); font-size: .92rem;
+  }
+  .busy-status::before {
+    content: ''; flex: none;
+    width: 1.6em; height: 1.6em;
+    border: 3px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  .busy-status[hidden] { display: none; }
   @media (prefers-reduced-motion: reduce) {
     button.is-busy::before { animation-duration: 1.6s; }
+    .busy-status::before { animation-duration: 1.8s; }
   }
   .actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-top: .5rem; }
   .actions .link { color: var(--muted); text-decoration: none; font-size: .9rem; }
@@ -608,10 +622,20 @@ const PAGE_SCRIPT = `  <script>
     (function () {
       function busy(form, submitter) {
         var button = submitter || form.querySelector('button[type=submit], button:not([type])');
-        if (!button || button.classList.contains('is-busy')) { return; }
-        button.classList.add('is-busy');
+        if (!button || button.getAttribute('aria-busy')) { return; }
         button.setAttribute('aria-busy', 'true');
         setTimeout(function () { button.disabled = true; }, 0);
+
+        // Traitement long annoncé par le formulaire lui-même (data-busy-message) :
+        // le spinner est alors dans le bandeau, pas dans le bouton.
+        var message = form.getAttribute('data-busy-message');
+        var status = form.querySelector('.busy-status');
+        if (message && status) {
+          status.querySelector('.busy-text').textContent = message;
+          status.hidden = false;
+        } else {
+          button.classList.add('is-busy');
+        }
       }
       window.helvetikBusy = busy;
 
@@ -624,11 +648,12 @@ const PAGE_SCRIPT = `  <script>
       // Retour arrière depuis la page suivante : le navigateur peut restituer
       // la page telle qu'elle était, bouton bloqué compris.
       window.addEventListener('pageshow', function () {
-        document.querySelectorAll('.is-busy').forEach(function (button) {
+        document.querySelectorAll('button[aria-busy]').forEach(function (button) {
           button.classList.remove('is-busy');
           button.removeAttribute('aria-busy');
           button.disabled = false;
         });
+        document.querySelectorAll('.busy-status').forEach(function (status) { status.hidden = true; });
       });
     })();
   </script>`;

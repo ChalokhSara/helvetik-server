@@ -292,11 +292,20 @@ function cameraScript(prefix: string, inputId: string, formId: string): string {
  * Pas d'attribut `capture` : sur mobile, il interdirait de choisir un scan
  * ou un PDF existant. Le sélecteur natif propose déjà l'appareil photo.
  */
-export function importBlock(options: { action: string; csrf: string; hint: string }): string {
+export function importBlock(options: {
+  action: string;
+  csrf: string;
+  hint: string;
+  /** Affiché pendant l'analyse, qui peut durer : lecture du document, parfois modèle de langage. */
+  busyMessage?: string;
+}): string {
+  const busyMessage = options.busyMessage ||
+    'Analyse du document en cours… Cela peut prendre quelques secondes, ne fermez pas la page.';
   return `    <details class="card" style="margin-bottom:1rem">
       <summary style="cursor:pointer;font-weight:600">Gagner du temps : partir d'une photo ou d'un document</summary>
       <p class="muted">${escapeHtml(options.hint)}</p>
-      <form method="post" action="${options.action}" enctype="multipart/form-data" id="import-form">
+      <form method="post" action="${options.action}" enctype="multipart/form-data" id="import-form"
+            data-busy-message="${escapeHtml(busyMessage)}">
 
         <input type="hidden" name="_csrf" value="${escapeHtml(options.csrf)}">
 
@@ -313,6 +322,7 @@ ${cameraMarkup('cam', 'Prendre une photo')}
         <div class="actions">
           <button type="submit">Analyser le document</button>
         </div>
+        <div class="busy-status" role="status" aria-live="polite" hidden><span class="busy-text"></span></div>
       </form>
       <p class="muted">Le fichier est analysé puis supprimé : il n'est jamais conservé.
       Les champs reconnus restent à vérifier avant enregistrement.</p>

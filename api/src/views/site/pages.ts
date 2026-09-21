@@ -507,7 +507,9 @@ ${messages(o)}
 ${editing ? '' : importBlock({
       action: '/espace/assurances/importer',
       csrf: o.csrf,
-      hint: 'Déposez votre police en PDF ou photographiez votre carte d\'assuré : caisse, numéro de police, prime et franchise en seront extraits.'
+      hint: 'Déposez votre police en PDF ou photographiez votre carte d\'assuré : caisse, numéro de police, prime et franchise en seront extraits.',
+      busyMessage: 'Analyse de votre police en cours : lecture du document, puis analyse par l\'IA. ' +
+        'Cela peut prendre jusqu\'à une minute, ne fermez pas la page.'
     })}
     <form method="post" action="${action}" class="card" id="main-form"${invalidAttr(o.invalidFields)}>
       ${csrfField(o.csrf)}
