@@ -6,7 +6,10 @@ import { IClient } from '../../models/client.model';
 import { IInsurance } from '../../models/insurance.model';
 import { monthlyPremium, cancellationDeadline, lamalPeriodEnd } from '../../utils/insurance-payload';
 import { OptimisationResult, modelLabel } from '../../services/lamal-optimisation.service';
+import { ADULT_FRANCHISES, ADULT_FROM_AGE, CHILD_FRANCHISES } from '../../services/household.service';
+import { TariffType } from '../../models/premium.model';
 import {
+  backLink,
   csrfField,
   escapeHtml,
   formatDate,
@@ -572,6 +575,23 @@ export function clientToValues(client: IClient): Values {
 // ----------------------------------------------------------- optimisation
 
 /**
+ * Lien de choix d'une offre.
+ *
+ * La comparaison ne sert pas qu'à désigner la moins chère : on change aussi de
+ * caisse pour son service, son réseau de médecins, ou simplement parce qu'on
+ * la connaît. Chaque offre est donc sélectionnable, et le choix voyage jusqu'aux
+ * lettres — c'est lui qui fixe le destinataire de l'affiliation.
+ */
+function pickHref(offer: { insurerId: number; tariffCode: string }, strategy: string): string {
+  const params = new URLSearchParams({
+    caisse: String(offer.insurerId),
+    modele: offer.tariffCode,
+    option: strategy === 'INDIVIDUAL' ? 'individuel' : 'groupe'
+  });
+  return `/espace/changement?${params.toString()}`;
+}
+
+/**
  * Écart par rapport au contrat actuel. Une économie s'affiche en vert, un
  * surcoût en rouge : sur un téléphone, c'est l'information qu'on cherche en
  * premier, avant même le prix.
@@ -590,23 +610,6 @@ function deltaBlock(savings: number, hasCurrent: boolean): string {
 }
 
 /** Liste des meilleures offres pour le foyer entier, toutes chez la même caisse. */
-/**
- * Lien de choix d'une offre.
- *
- * La comparaison ne sert pas qu'à désigner la moins chère : on change aussi de
- * caisse pour son service, son réseau de médecins, ou simplement parce qu'on
- * la connaît. Chaque offre est donc sélectionnable, et le choix voyage jusqu'aux
- * lettres — c'est lui qui fixe le destinataire de l'affiliation.
- */
-function pickHref(offer: { insurerId: number; tariffCode: string }, strategy: string): string {
-  const params = new URLSearchParams({
-    caisse: String(offer.insurerId),
-    modele: offer.tariffCode,
-    option: strategy === 'INDIVIDUAL' ? 'individuel' : 'groupe'
-  });
-  return `/espace/changement?${params.toString()}`;
-}
-
 function groupedList(result: OptimisationResult, limit: number, strategy: string): string {
   return result.offers.slice(0, limit).map((offer) => {
     const isCurrent = result.current?.insurerId === offer.insurerId &&
@@ -659,10 +662,80 @@ ${rows}
       un même assureur n'ouvre droit à aucun rabais.</p>`;
 }
 
+/** Libellé des modèles d'assurance alternatifs, pour le filtre de comparaison. */
+const TARIFF_TYPE_LABELS: Record<TariffType, string> = {
+  BASE: 'Modèle standard',
+  HAM: 'Médecin de famille',
+  HMO: 'HMO',
+  DIV: 'Télémédecine / autre'
+};
+
+/**
+ * Personnalisation de la comparaison : franchise par assuré et modèle
+ * d'assurance, indépendamment de ce qui figure sur le contrat en cours.
+ *
+ * Un formulaire GET plutôt qu'un script : le résultat reste une page, donc
+ * une URL qu'on peut partager ou recharger, et la page fonctionne sans
+ * JavaScript comme le reste du site.
+ */
+function comparisonFilters(
+  result: OptimisationResult,
+  selectedModels: TariffType[],
+  accidentExcluded: boolean
+): string {
+  const franchiseField = (person: OptimisationResult['insured'][number]) => {
+    const options = person.age < ADULT_FROM_AGE ? CHILD_FRANCHISES : ADULT_FRANCHISES;
+    const list = options
+      .map((value) => `<option value="${value}"${value === person.franchise ? ' selected' : ''}>${value} CHF</option>`)
+      .join('\n          ');
+    return `      <div>
+        <label for="f_${person.clientUid}">Franchise — ${escapeHtml(person.name)}</label>
+        <select id="f_${person.clientUid}" name="f_${person.clientUid}">
+          ${list}
+        </select>
+      </div>`;
+  };
+
+  const modelChoice = (type: TariffType) => `        <div class="check">
+          <input type="checkbox" id="modele-${type}" name="modele" value="${type}"${
+    selectedModels.includes(type) ? ' checked' : ''}>
+          <label for="modele-${type}">${TARIFF_TYPE_LABELS[type]}</label>
+        </div>`;
+
+  // Repliée par défaut, sauf quand un filtre a déjà été appliqué : rouverte,
+  // sinon l'assuré qui vient de personnaliser sa comparaison la perdrait de vue.
+  const active = selectedModels.length > 0 || accidentExcluded ||
+    result.insured.some((p) => p.franchiseSource === 'paramètre');
+
+  return `    <details class="card"${active ? ' open' : ''}>
+      <summary style="cursor:pointer;font-weight:600">Personnaliser la comparaison</summary>
+      <p class="muted">Pour explorer d'autres choix sans toucher à votre contrat actuel.</p>
+      <form method="get" action="/espace/optimisation">
+        <div class="grid">
+${result.insured.map(franchiseField).join('\n')}
+        </div>
+        <fieldset>
+          <legend>Modèle d'assurance</legend>
+          <p class="muted">Aucune case cochée : tous les modèles sont comparés.</p>
+${(Object.keys(TARIFF_TYPE_LABELS) as TariffType[]).map(modelChoice).join('\n')}
+        </fieldset>
+        <div class="check">
+          <input type="checkbox" id="accident" name="accident" value="0"${accidentExcluded ? ' checked' : ''}>
+          <label for="accident">Mon employeur me couvre déjà contre les accidents (à exclure de la prime)</label>
+        </div>
+        <div class="actions"><button type="submit">Recalculer</button></div>
+      </form>
+    </details>`;
+}
+
 export function renderOptimisation(o: {
   email: string;
   result: OptimisationResult;
   limit: number;
+  /** Modèles retenus par le filtre de comparaison. */
+  selectedModels?: TariffType[];
+  /** Coche « mon employeur me couvre » du filtre de comparaison. */
+  accidentExcluded?: boolean;
 }): string {
   const { result } = o;
   const individual = result.individual;
@@ -689,7 +762,8 @@ export function renderOptimisation(o: {
   if (bestSavings.monthly <= 0) {
     hero = '    <p class="msg ok">Votre contrat actuel est déjà le plus avantageux.</p>';
   } else if (!individual) {
-    hero = `    <div class="stats" style="margin-bottom:1rem">
+    hero = `    <p class="stats-caption">Vous économisez</p>
+    <div class="stats" style="margin-bottom:1rem">
       <div class="stat accent">
         <span class="value">${money(bestSavings.monthly)}</span>
         <span class="label">d'économie par mois</span>
@@ -709,7 +783,8 @@ export function renderOptimisation(o: {
       : 'Les deux stratégies aboutissent au même montant : la caisse la moins chère est la même ' +
         'pour chaque assuré du foyer.';
 
-    hero = `    <div class="stats stats-4" style="margin-bottom:.75rem">
+    hero = `    <p class="stats-caption">Vous économisez</p>
+    <div class="stats stats-4" style="margin-bottom:.75rem">
 ${stat('Même caisse pour tous', result.potentialSavings.monthly, 'd\'économie par mois', !split)}
 ${stat('Même caisse pour tous', result.potentialSavings.yearly, 'soit par an', !split)}
 ${stat('Chacun sa caisse', individual.savings.monthly, 'd\'économie par mois', split)}
@@ -718,33 +793,12 @@ ${stat('Chacun sa caisse', individual.savings.yearly, 'soit par an', split)}
     <p class="muted" style="margin-bottom:1rem">${note}</p>`;
   }
 
-  const current = result.current
-    ? `      <p>Votre contrat : <strong>${escapeHtml(result.current.insurer)} — ${escapeHtml(modelLabel(result.current))}</strong>,
-      ${money(result.current.monthly.total)} par mois pour l'ensemble du foyer.</p>`
-    : '      <p class="muted">Contrat actuel non identifié : les offres sont affichées sans comparaison.</p>';
-
-  const people = result.insured ?? [];
-
   /**
-   * Passage à l'acte. La stratégie retenue est transmise à la page suivante :
-   * l'assuré a fait un choix en consultant les onglets, le lui redemander
-   * reviendrait à perdre l'information.
+   * Stratégie retenue, transmise à la page suivante : l'assuré a fait un
+   * choix en consultant les onglets, le lui redemander reviendrait à perdre
+   * l'information.
    */
   const strategy = individual && individual.extra.monthly > 0 ? 'INDIVIDUAL' : 'GROUPED';
-  const subscribe = bestSavings.monthly > 0
-    ? `    <div class="card cta">
-      <h2>Comment ça se passe ensuite</h2>
-      <p>Choisissez une caisse ci-dessus : nous préparons vos deux courriers, remplis
-      et signés — la résiliation de votre caisse actuelle et la demande d'affiliation
-      à la nouvelle. Ils doivent parvenir à votre caisse <strong>avant fin
-      novembre</strong>, et c'est vous qui les envoyez en recommandé.</p>
-      <div class="actions">
-        <a class="link" href="/espace/souscription?option=${strategy === 'INDIVIDUAL' ? 'individuel' : 'groupe'}">
-          Donner mon avis sur le service</a>
-      </div>
-    </div>
-`
-    : '';
 
   /**
    * Raccourci vers la meilleure offre, posé **au-dessus** de la liste.
@@ -794,48 +848,16 @@ ${individualBlock(result)}
       </div>`;
 
   return sitePage('Helvetik — Optimiser ma LAMal', { email: o.email, active: 'optimisation' },
-    `    <h1>Optimiser mon assurance de base</h1>
-    <p class="lead">Primes ${result.year} pour ${escapeHtml(result.location.label)} —
-    région ${result.location.region}, canton ${escapeHtml(result.location.canton)}.</p>
+    `${backLink('/espace/assurances', 'Mes assurances')}
+    <h1>Optimiser mon assurance de base</h1>
 ${hero}
 ${messages({ warnings: result.warnings })}
-    <div class="card">
-      <h2>Situation actuelle</h2>
-${current}
-      <p class="muted">Les montants affichés sont ceux que vous payez réellement : la
-      redistribution de la taxe environnementale, ${money(result.redistributionYearly / 12)} par
-      assuré et par mois, en est déjà déduite.</p>
-    </div>
+${comparisonFilters(result, o.selectedModels || [], o.accidentExcluded || false)}
 
     <div class="card">
 ${offersSection}
       <p class="muted">Tarifs officiels de l'Office fédéral de la santé publique, millésime
       ${result.year}.</p>
-    </div>
-${subscribe}
-    <div class="card">
-      <h2>Sur quelles bases ce calcul est fait</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Assuré</th><th>Année de naissance</th><th class="num">Franchise</th><th>Couverture accident</th></tr>
-          </thead>
-          <tbody>
-${people.map((p) => `            <tr>
-              <td>${escapeHtml(p.name)}</td>
-              <td>${p.yob}</td>
-              <td class="num">${p.franchise} CHF</td>
-              <td>${p.coverage === 1
-                ? '<strong>Incluse</strong> dans la prime'
-                : 'Couverte par l\'employeur, <strong>exclue</strong> de la prime'}</td>
-            </tr>`).join('\n')}
-          </tbody>
-        </table>
-      </div>
-      <p class="muted">La couverture accident pèse une quinzaine de francs par mois. Si vous
-      travaillez plus de 8 heures par semaine, votre employeur vous couvre et elle doit être
-      exclue — sinon la comparaison surestime vos primes.</p>
-      <div class="actions"><a class="btn btn-ghost" href="/espace/assurances">Corriger mes contrats</a></div>
     </div>`);
 }
 
@@ -916,12 +938,11 @@ export function renderChange(o: {
   notice?: string;
   error?: string;
 }): string {
-  const suffix = o.query ? `?${o.query}` : '';
-  const surveyHref = `/espace/souscription${o.query ? `?${o.query}` : ''}`;
   const deadlinePassed = o.deadline.getTime() < Date.now();
 
   const savings = o.savings && o.savings.monthly > 0
-    ? `    <div class="stats" style="margin-bottom:1rem">
+    ? `    <p class="stats-caption">Vous économisez</p>
+    <div class="stats" style="margin-bottom:1rem">
       <div class="stat accent"><span class="value">${money(o.savings.monthly)}</span>
         <span class="label">par mois</span></div>
       <div class="stat"><span class="value">${money(o.savings.yearly)}</span>
@@ -934,11 +955,22 @@ export function renderChange(o: {
   const survey = o.hasFeedback
     ? ''
     : `    <div class="card">
-      <h2>Quelques questions, puis vos lettres</h2>
-      <p>Helvetik est jeune et se construit avec ceux qui l'utilisent. Avant de
-      produire vos courriers, dites-nous ce que vous attendez du service : trois
-      minutes, une seule fois.</p>
-      <div class="actions"><a class="btn" href="${surveyHref}">Répondre au questionnaire</a></div>
+      <h2>Souscrire ma nouvelle assurance et résilier l'ancienne</h2>
+      <form method="get" action="/espace/souscription">
+${Array.from(new URLSearchParams(o.query || '')).map(([k, v]) =>
+        `        <input type="hidden" name="${escapeHtml(k)}" value="${escapeHtml(v)}">`).join('\n')}
+        <div class="check">
+          <input type="checkbox" id="consent-impaye" name="consent" value="1" required>
+          <label for="consent-impaye">Je comprends que tant que j'ai des primes impayées, des
+          participations aux coûts, des intérêts moratoires ou des frais de poursuite non
+          réglés, je ne peux pas changer de caisse-maladie — la loi prévoit que le changement
+          ne prend effet qu'après le paiement intégral de ces montants. Ma caisse actuelle a
+          l'obligation de m'informer que ma demande de changement restera sans effet si ces
+          paiements n'interviennent pas dans le délai imparti. J'accepte que Helvetik
+          transmette ces informations en mon nom.</label>
+        </div>
+        <div class="actions"><button type="submit" class="btn">Souscrire</button></div>
+      </form>
     </div>`;
 
   // La signature conditionne toutes les lettres : elle vient ensuite.
@@ -958,176 +990,18 @@ export function renderChange(o: {
       <div class="actions"><a class="btn" href="/espace/signature">Signer maintenant</a></div>
     </div>`;
 
-  // Envoi par ePost. Deux boutons distincts plutôt qu'un seul : les deux
-  // courriers ne partent pas au même destinataire, et l'assuré peut vouloir
-  // poster la résiliation tout en gardant l'affiliation sous la main.
-  const sending = (candidate: ChangeCandidate) => {
-    if (!o.epost?.enabled) {
-      return '';
-    }
-    const live = o.epost.mode === 'LIVE';
-    const form = (path: string, label: string) =>
-      `          <form method="post" action="/espace/changement/${
-        escapeHtml(candidate.clientUid)}/${path}/envoyer" style="display:inline">
-            <input type="hidden" name="_csrf" value="${escapeHtml(o.csrf)}">
-            <input type="hidden" name="query" value="${escapeHtml(o.query || '')}">
-            <button class="btn btn-ghost" type="submit"${live
-              // L'apostrophe de « l'affiliation » fermerait la chaîne JavaScript
-              // au milieu de l'attribut : la confirmation ne s'afficherait plus,
-              // et le courrier partirait sans que personne n'ait confirmé.
-              ? ` onclick="return confirm('Envoyer réellement ${
-                label.replace(/['\\]/g, '\\$&')} en recommandé ? Une résiliation postée ne se reprend pas.')"`
-              : ''}>${live ? 'Poster' : 'Estimer l\'envoi'} — ${label}</button>
-          </form>`;
-
-    return `        <p class="muted" style="margin:.6rem 0 .2rem">${live
-      ? '<strong>Envoi réel.</strong> Le courrier part en recommandé, à vos frais.'
-      : '<strong>Mode aperçu.</strong> Rien ne part : ePost annonce seulement le prix et les canaux disponibles.'}</p>
-        <div class="actions">
-${form('resiliation', 'la résiliation')}
-${form('affiliation', 'l\'affiliation')}
-        </div>
-`;
-  };
-
-  // Ce qui est déjà parti. Sans cette trace, un assuré qui doute renverrait la
-  // même résiliation, et une caisse recevant deux courriers contradictoires
-  // s'en tient au premier.
-  const history = (candidate: ChangeCandidate) => {
-    if (!candidate.dispatches.length) {
-      return '';
-    }
-    const line = (d: ChangeDispatch) => {
-      const what = d.kind === 'CANCELLATION' ? 'Résiliation' : 'Affiliation';
-      const when = formatDate(d.sentAt);
-      if (d.error) {
-        return `<li>${what} · ${when} · <span class="err">échec : ${escapeHtml(d.error)}</span></li>`;
-      }
-      const cost = d.price !== undefined ? ` · ${money(d.price)}` : '';
-      return d.mode === 'LIVE'
-        ? `<li>${what} · <strong>postée le ${when}</strong>${cost}${
-          d.status ? ` · ${escapeHtml(d.status)}` : ''}</li>`
-        : `<li>${what} · aperçu du ${when}${cost} · <span class="muted">rien n'a été envoyé</span></li>`;
-    };
-    return `        <ul class="muted" style="margin:.4rem 0 0;padding-left:1.1rem">
-${candidate.dispatches.map(line).map((l) => '          ' + l).join('\n')}
-        </ul>
-`;
-  };
-
-  const row = (candidate: ChangeCandidate) => {
-    // Déjà au meilleur tarif : proposer de résilier pour se réaffilier à la
-    // même caisse, au même modèle, serait absurde — et coûterait à l'assuré
-    // des recommandés pour rien.
-    if (candidate.alreadyOptimal) {
-      return `      <div class="card">
-        <h2>${escapeHtml(candidate.name)}</h2>
-        <p class="msg ok">Déjà au meilleur tarif : ${
-        candidate.currentInsurer ? escapeHtml(candidate.currentInsurer) : 'sa caisse actuelle'}${
-        candidate.targetModel ? ` — ${escapeHtml(candidate.targetModel)}` : ''
-      } est l'offre la moins chère de sa région pour ses critères. Aucune lettre à envoyer.</p>
-      </div>`;
-    }
-
-    const missing: string[] = [];
-    if (!o.hasFeedback) {
-      missing.push('vos réponses au questionnaire');
-    }
-    if (!o.hasSignature) {
-      missing.push('votre signature');
-    }
-    if (candidate.identityKinds.length < 2) {
-      missing.push('les deux faces de la pièce d\'identité');
-    }
-    if (!candidate.hasContract) {
-      missing.push('le contrat actuel, pour son numéro de police');
-    }
-
-    const target = candidate.targetInsurer
-      ? `<strong>${escapeHtml(candidate.targetInsurer)}</strong>${
-        candidate.targetModel ? ` — ${escapeHtml(candidate.targetModel)}` : ''}`
-      : '<span class="muted">à choisir dans la comparaison</span>';
-
-    const letters = missing.length
-      ? `        <p class="msg warn">Avant de produire les lettres, il manque ${
-        escapeHtml(missing.join(', '))}.</p>
-        <div class="actions">
-          ${!o.hasFeedback
-            ? `<a class="btn" href="${surveyHref}">Répondre au questionnaire</a>`
-            : ''}
-          ${candidate.identityKinds.length < 2
-            ? `<a class="btn btn-ghost" href="/espace/assures/${escapeHtml(candidate.clientUid)}/piece">Déposer la pièce</a>`
-            : ''}
-          ${!candidate.hasContract
-            ? '<a class="btn btn-ghost" href="/espace/assurances/nouvelle">Ajouter le contrat</a>'
-            : ''}
-        </div>`
-      : `        <div class="actions">
-          <a class="btn" href="/espace/changement/${escapeHtml(candidate.clientUid)}/resiliation${suffix}">
-            Lettre de résiliation</a>
-          <a class="btn" href="/espace/changement/${escapeHtml(candidate.clientUid)}/affiliation${suffix}">
-            Lettre d'affiliation</a>
-        </div>
-${sending(candidate)}${history(candidate)}`;
-
-    return `      <div class="card">
-        <h2>${escapeHtml(candidate.name)}</h2>
-        <p>Quitte ${candidate.currentInsurer
-          ? `<strong>${escapeHtml(candidate.currentInsurer)}</strong>`
-          : '<span class="muted">caisse actuelle inconnue</span>'}${
-        candidate.policyNumber ? ` (police ${escapeHtml(candidate.policyNumber)})` : ''}
-        pour ${target}.</p>
-        ${candidate.franchise !== undefined
-          ? `<p class="muted">Franchise ${candidate.franchise} CHF${
-            candidate.monthlySaving ? ` · ${money(candidate.monthlySaving)} d'économie par mois` : ''}.</p>`
-          : ''}
-${letters}
-      </div>`;
-  };
-
   return sitePage('Helvetik — Changer de caisse', { email: o.email, active: 'optimisation' },
-    `    <h1>Changer de caisse pour ${o.effectiveYear}</h1>
-    <p class="lead">Deux courriers suffisent : résilier votre caisse actuelle, et demander
-    votre affiliation à la nouvelle. Nous les préparons, remplis et signés ; vous les
-    envoyez en recommandé.</p>
+    `${backLink('/espace/optimisation', 'Optimiser ma LAMal')}
+    <h1>Changer de caisse pour ${o.effectiveYear}</h1>
 ${messages({ notice: o.notice, error: o.error })}
 ${deadlinePassed
       ? `    <p class="msg err"><strong>L'échéance du ${formatDate(o.deadline)} est passée.</strong>
       Une résiliation reçue après cette date ne prend effet qu'un an plus tard. Vous
       pouvez tout de même préparer vos courriers pour l'an prochain.</p>`
-      : `    <p class="msg warn"><strong>À envoyer avant le ${formatDate(o.deadline)}.</strong>
-      C'est la date de <em>réception</em> par la caisse qui compte, pas celle de l'envoi :
-      comptez quelques jours de poste, et gardez le récépissé du recommandé.</p>`}
+      : ''}
 ${savings}
 ${survey}
-${signature}
-${o.candidates.length
-      ? o.candidates.map(row).join('\n')
-      : '    <div class="card"><p class="empty">Aucun assuré à faire changer de caisse.</p></div>'}
-
-    <div class="card">
-      <h2>Ce service va s'étoffer</h2>
-      <p>Aujourd'hui nous préparons vos courriers ; demain nous voulons les envoyer
-      et suivre les confirmations à votre place. ${o.hasFeedback
-        ? 'Vos réponses orientent ce que nous construisons ensuite — merci.'
-        : 'Vos réponses orienteront ce que nous construisons ensuite.'}</p>
-      ${o.hasFeedback
-        ? `<div class="actions"><a class="link" href="${surveyHref}">Modifier mes réponses</a></div>`
-        : ''}
-    </div>
-
-    <div class="card">
-      <h2>Ce que nous faisons, et ce qui reste à votre charge</h2>
-      <ul class="muted" style="margin:.4rem 0 0;padding-left:1.1rem">
-        <li>Nous produisons les lettres, avec vos coordonnées, votre numéro de police,
-        la franchise et le modèle retenus, et votre signature.</li>
-        <li>${o.epost?.enabled && o.epost.mode === 'LIVE'
-          ? '<strong>Nous pouvons les poster pour vous</strong>, en recommandé, depuis cette page — ou vous les envoyez vous-même. Dans les deux cas, joignez une copie de votre pièce d\'identité et gardez le récépissé.'
-          : '<strong>Vous les envoyez vous-même</strong>, en recommandé, avec une copie de votre pièce d\'identité. Nous n\'expédions rien à votre place : un courrier perdu ne se découvrirait qu\'en janvier.'}</li>
-        <li>Votre couverture n'est jamais interrompue : la nouvelle caisse atteste
-        auprès de l'ancienne avant que la résiliation ne prenne effet.</li>
-      </ul>
-    </div>`);
+${signature}`);
 }
 
 /** Page de recueil de la signature. */
@@ -1140,7 +1014,8 @@ export function renderSignature(o: {
   error?: string;
 }): string {
   return sitePage('Helvetik — Ma signature', { email: o.email, active: 'optimisation' },
-    `    <h1>Ma signature</h1>
+    `${backLink(o.returnTo, 'Retour')}
+    <h1>Ma signature</h1>
     <p class="lead">Elle sera reproduite sur vos lettres de résiliation et d'affiliation.
     Nous ne vous la demandons qu'une fois : elle est conservée chiffrée, comme votre
     pièce d'identité, et vous pouvez la supprimer à tout moment.</p>

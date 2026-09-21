@@ -98,8 +98,11 @@ const STYLES = `
   }
   .brand span { color: var(--brand); }
   .brand-logo { height: 2.5rem; display: block; }
-  .topbar .who { font-size: .85rem; color: var(--muted); }
-  .topbar .who a { margin-left: .6rem; }
+  .topbar .who {
+    display: flex; flex-direction: column; align-items: flex-end; gap: .2rem;
+    font-size: .85rem; color: var(--muted); line-height: 1.3;
+  }
+  .topbar .who a { font-size: .82rem; }
 
   nav.tabs {
     display: flex; gap: .25rem; overflow-x: auto;
@@ -115,6 +118,66 @@ const STYLES = `
     border-bottom: 2px solid transparent;
   }
   nav.tabs a.active { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
+
+  /* --- navigation mobile : tiroir ouvert depuis un bouton en bas d'écran ---
+     Rien en JavaScript : une case à cocher masquée, activée par les
+     étiquettes (bouton et fond assombri), pilote l'affichage en CSS. */
+  .nav-toggle { position: absolute; opacity: 0; pointer-events: none; }
+  .nav-burger, .nav-drawer, .nav-backdrop { display: none; }
+
+  @media (max-width: 680px) {
+    nav.tabs { display: none; }
+
+    body:has(.nav-burger) main { padding-bottom: 6rem; }
+
+    .nav-burger {
+      display: flex; align-items: center; justify-content: center;
+      position: fixed; z-index: 30;
+      left: 50%; bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+      transform: translateX(-50%);
+      width: 56px; height: 56px; border-radius: 50%;
+      background: var(--brand); box-shadow: 0 6px 18px rgba(0, 0, 0, .25);
+      cursor: pointer;
+    }
+    .nav-burger .bar {
+      display: block; width: 22px; height: 2px; background: #fff; border-radius: 2px;
+      position: relative;
+    }
+    .nav-burger .bar::before, .nav-burger .bar::after {
+      content: ''; position: absolute; left: 0; width: 22px; height: 2px;
+      background: #fff; border-radius: 2px; transition: transform .2s;
+    }
+    .nav-burger .bar::before { top: -7px; }
+    .nav-burger .bar::after { top: 7px; }
+
+    .nav-backdrop {
+      display: block; position: fixed; inset: 0; z-index: 28;
+      background: rgba(15, 17, 21, .4);
+      opacity: 0; pointer-events: none; transition: opacity .2s;
+    }
+    .nav-drawer {
+      display: flex; flex-direction: column;
+      position: fixed; z-index: 29; left: 0; right: 0; bottom: 0;
+      background: var(--surface); border-top-left-radius: 18px; border-top-right-radius: 18px;
+      box-shadow: 0 -8px 24px rgba(0, 0, 0, .2);
+      padding: .5rem 0 calc(1rem + env(safe-area-inset-bottom, 0px));
+      transform: translateY(100%); transition: transform .25s ease-out;
+      max-height: 70vh; overflow-y: auto;
+    }
+    .nav-drawer a {
+      padding: .95rem 1.25rem;
+      color: var(--ink); text-decoration: none; font-size: 1rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .nav-drawer a.active { color: var(--brand); font-weight: 600; }
+    .nav-drawer a:last-child { border-bottom: 0; }
+
+    .nav-toggle:checked ~ .nav-backdrop { opacity: 1; pointer-events: auto; }
+    .nav-toggle:checked ~ .nav-drawer { transform: translateY(0); }
+    .nav-toggle:checked ~ .nav-burger .bar { background: transparent; }
+    .nav-toggle:checked ~ .nav-burger .bar::before { transform: translateY(7px) rotate(45deg); }
+    .nav-toggle:checked ~ .nav-burger .bar::after { transform: translateY(-7px) rotate(-45deg); }
+  }
 
   main { max-width: 960px; margin: 0 auto; padding: 1.25rem 1rem 4rem; }
 
@@ -155,6 +218,12 @@ const STYLES = `
   .splash-actions .link:hover { text-decoration: underline; }
   .splash-actions .btn.splash-secondary { margin-top: 1rem; }
   h1 { font-size: 1.4rem; margin: 0 0 1rem; }
+  .back-link {
+    display: inline-flex; align-items: center; gap: .35rem;
+    color: var(--muted); text-decoration: none; font-size: .9rem;
+    margin-bottom: .75rem;
+  }
+  .back-link:hover { color: var(--brand); }
   h2 { font-size: 1.1rem; margin: 0 0 .75rem; }
   p.lead { color: var(--muted); margin-top: -.5rem; }
 
@@ -344,6 +413,10 @@ const STYLES = `
   .badge.off { background: var(--err-bg); color: var(--err-ink); }
   .badge.soon { background: var(--warn-bg); color: var(--warn-ink); }
 
+  .stats-caption {
+    color: var(--muted); font-size: .78rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .04em; margin: 0 0 .5rem;
+  }
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .75rem; }
   .stat { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem; }
   .stat .value { display: block; font-size: 1.6rem; font-weight: 700; line-height: 1.2; }
@@ -567,18 +640,32 @@ function tabs(active?: string): string {
   }
   const tab = (href: string, label: string, key: string) =>
     `<a href="${href}"${active === key ? ' class="active"' : ''}>${label}</a>`;
+  const links = [
+    tab('/espace', 'Accueil', 'accueil'),
+    tab('/espace/assures', 'Mes assurés', 'assures'),
+    tab('/espace/assurances', 'Mes assurances', 'assurances'),
+    tab('/espace/optimisation', 'Optimiser ma LAMal', 'optimisation')
+  ].join('\n    ');
 
+  // Barre d'onglets classique en haut, tiroir accessible depuis un bouton en
+  // bas d'écran sur mobile (voir le commentaire CSS de .nav-toggle) : les
+  // deux portent les mêmes liens, un seul est visible selon la largeur.
   return `  <nav class="tabs" aria-label="Navigation">
-    ${tab('/espace', 'Accueil', 'accueil')}
-    ${tab('/espace/assures', 'Mes assurés', 'assures')}
-    ${tab('/espace/assurances', 'Mes assurances', 'assurances')}
-    ${tab('/espace/optimisation', 'Optimiser ma LAMal', 'optimisation')}
-  </nav>`;
+    ${links}
+  </nav>
+  <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-hidden="true">
+  <label for="nav-toggle" class="nav-backdrop"></label>
+  <nav class="nav-drawer" aria-label="Navigation">
+    ${links}
+  </nav>
+  <label for="nav-toggle" class="nav-burger" aria-label="Ouvrir le menu">
+    <span class="bar"></span>
+  </label>`;
 }
 
 export function sitePage(title: string, ctx: SiteContext, body: string): string {
   const account = ctx.email
-    ? `<span class="who">${escapeHtml(ctx.email)}<a href="/deconnexion">Se déconnecter</a></span>`
+    ? `<span class="who"><span>${escapeHtml(ctx.email)}</span><a href="/deconnexion">Se déconnecter</a></span>`
     : '<span class="who"><a class="btn" href="/connexion">Se connecter</a></span>';
 
   return `<!DOCTYPE html>
@@ -723,4 +810,9 @@ export function skipStepButton(action: string, csrf: string, label = 'Ignorer ce
       ${csrfField(csrf)}
       <button type="submit" class="btn btn-ghost">${escapeHtml(label)}</button>
     </form>`;
+}
+
+/** Flèche de retour vers la page qui a mené ici, posée au-dessus du titre. */
+export function backLink(href: string, label: string): string {
+  return `    <a class="back-link" href="${href}">← ${escapeHtml(label)}</a>`;
 }

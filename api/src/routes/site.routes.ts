@@ -55,6 +55,7 @@ import {
   describeClient,
   PHONE_REQUIRED_MESSAGE
 } from '../services/household.service';
+import { TARIFF_TYPES, TariffType } from '../models/premium.model';
 import { modelLabel, optimiseLamal } from '../services/lamal-optimisation.service';
 import {
   Catalogue,
@@ -1754,12 +1755,40 @@ router.post('/espace/assurances/:uid/supprimer', async (req: Request, res: Respo
 
 // ------------------------------------------------------------ optimisation
 
+/**
+ * Franchise voulue par assuré, tirée des paramètres `f_<clientUid>=<montant>`.
+ * Une clé inconnue ou une valeur absurde est simplement ignorée : la franchise
+ * est de toute façon ramenée à la plus proche valeur légale ensuite.
+ */
+function franchiseOverridesFromQuery(query: Request['query']): Record<string, number> {
+  const overrides: Record<string, number> = {};
+  for (const [key, value] of Object.entries(query)) {
+    if (!key.startsWith('f_')) {
+      continue;
+    }
+    const amount = Number(value);
+    if (Number.isFinite(amount) && amount >= 0) {
+      overrides[key.slice(2)] = amount;
+    }
+  }
+  return overrides;
+}
+
 router.get('/espace/optimisation', async (req: Request, res: Response) => {
   const user = req.siteUser!;
+  const requestedModels = Array.isArray(req.query.modele) ? req.query.modele : [req.query.modele];
+  const selectedModels = requestedModels
+    .map((m) => String(m || '').trim())
+    .filter((m): m is TariffType => (TARIFF_TYPES as readonly string[]).includes(m));
+  // Coche « mon employeur me couvre » : exclut l'accident de la prime pour tout le foyer.
+  const accidentExcluded = req.query.accident === '0';
 
   try {
-    const context = await buildHouseholdContext(user.uid);
-    const result = await optimiseLamal(context);
+    const context = await buildHouseholdContext(user.uid, {
+      franchiseOverrides: franchiseOverridesFromQuery(req.query),
+      coverageOverride: accidentExcluded ? '0' : undefined
+    });
+    const result = await optimiseLamal(context, { models: selectedModels.length ? selectedModels : undefined });
 
     if (!result) {
       return res.type('html').send(views.renderOptimisationUnavailable({
@@ -1772,7 +1801,9 @@ router.get('/espace/optimisation', async (req: Request, res: Response) => {
     res.type('html').send(views.renderOptimisation({
       email: user.email,
       result,
-      limit: OFFERS_SHOWN
+      limit: OFFERS_SHOWN,
+      selectedModels,
+      accidentExcluded
     }));
   } catch (err) {
     if (err instanceof HouseholdError) {

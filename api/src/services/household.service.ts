@@ -15,7 +15,7 @@ export const CHILD_FRANCHISES = [0, 100, 200, 300, 400, 500, 600];
 
 /** Au-delà, priminfo ne suit plus et l'URL devient ingérable. */
 export const MAX_INSURED = 9;
-const ADULT_FROM_AGE = 19;
+export const ADULT_FROM_AGE = 19;
 
 export interface InsuredSummary {
   clientUid: string;
@@ -47,6 +47,13 @@ export interface HouseholdOptions {
   clientUids?: string[];
   /** Force la couverture accident pour tous : '0' ou '1'. */
   coverageOverride?: string;
+  /**
+   * Franchise voulue pour la comparaison, par assuré (clientUid → montant) —
+   * indépendante du contrat en cours, pour explorer « et si je prenais une
+   * franchise plus haute ? » sans y engager quoi que ce soit. Ramenée à la
+   * plus proche valeur légale comme n'importe quelle franchise.
+   */
+  franchiseOverrides?: Record<string, number>;
 }
 
 export const PHONE_REQUIRED_MESSAGE =
@@ -165,15 +172,18 @@ export async function buildHouseholdContext(
     const contract = lamalByClient.get(client.uid);
     const age = ageAt(client.birthdate as Date, now);
     const isChild = age < ADULT_FROM_AGE;
-    const franchise = nearestLegalFranchise(contract?.franchise, isChild);
+    const requested = options.franchiseOverrides?.[client.uid];
+    const franchise = nearestLegalFranchise(requested ?? contract?.franchise, isChild);
 
-    if (contract?.franchise !== undefined && contract.franchise !== franchise) {
+    // Un écart entre le contrat et la franchise légale n'a rien à dire quand
+    // c'est justement ce que le paramètre corrige délibérément.
+    if (requested === undefined && contract?.franchise !== undefined && contract.franchise !== franchise) {
       warnings.push(
         `La franchise de ${describeClient(client)} (${contract.franchise}) n'est pas une franchise légale ` +
         `pour son âge ; ${franchise} a été utilisée.`
       );
     }
-    if (!contract) {
+    if (requested === undefined && !contract) {
       warnings.push(
         `Aucun contrat LAMal en vigueur pour ${describeClient(client)} : franchise par défaut de ${franchise}.`
       );
@@ -190,7 +200,7 @@ export async function buildHouseholdContext(
       yob: (client.birthdate as Date).getUTCFullYear(),
       age,
       franchise,
-      franchiseSource: contract ? 'contrat' : 'défaut',
+      franchiseSource: requested !== undefined ? 'paramètre' : contract ? 'contrat' : 'défaut',
       employerAccidentCoverage: coveredByEmployer,
       coverage: Number(coverage),
       coverageSource: options.coverageOverride !== undefined
