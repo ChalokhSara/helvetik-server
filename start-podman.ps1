@@ -3,12 +3,13 @@
   Démarre la pile Helvetik avec Podman, quand Docker Desktop n'est pas utilisable.
 
 .DESCRIPTION
-  Trois étapes, chacune sautée si elle est déjà faite :
+  Quatre étapes, chacune sautée si elle est déjà faite :
 
     1. la machine virtuelle Podman ;
     2. son relais Windows (win-sshproxy), qui expose Podman sur le pipe
        \\.\pipe\<machine>. C'est par lui que passe `podman compose` ;
-    3. la pile du docker-compose.yml, puis l'attente de /health.
+    3. la pile du docker-compose.yml, puis l'attente de /health ;
+    4. le renvoi des ports vers les appareils Android branchés (adb reverse).
 
   Pourquoi relancer le relais à la main : `podman machine start` le lance
   avec deux pipes, le sien et \\.\pipe\docker_engine. Tant que Docker Desktop
@@ -138,9 +139,55 @@ if (-not $ready) {
     exit 1
 }
 
+# --- 4. appareils Android ---------------------------------------------------
+#
+# Le serveur n'écoute que sur la boucle locale du PC : un téléphone ne le
+# joint pas par l'adresse Wi-Fi du PC, et le pare-feu bloquerait de toute
+# façon sur un réseau « Public ». `adb reverse` renvoie localhost:3000 de
+# chaque appareil branché vers le PC, par la connexion adb : l'app se règle
+# alors sur http://localhost:3000, sur l'émulateur comme sur un téléphone.
+# Le renvoi tombe quand l'appareil est débranché : relancer le script.
+
+$adb = Get-Command adb -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+if (-not $adb) {
+    $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
+    $candidate = Join-Path $sdk 'platform-tools\adb.exe'
+    if (Test-Path $candidate) { $adb = $candidate }
+}
+
+$devices = @()
+if ($adb) {
+    $devices = & $adb devices | Select-Object -Skip 1 |
+        Where-Object { $_ -match '^(\S+)\s+device$' } | ForEach-Object { $Matches[1] }
+}
+
+if ($devices) {
+    Step 'Renvoi des ports vers les appareils Android (adb reverse)'
+    $linked = @()
+    foreach ($device in $devices) {
+        & $adb -s $device reverse tcp:3000 tcp:3000 2>$null | Out-Null
+        $ok = $LASTEXITCODE -eq 0
+        & $adb -s $device reverse tcp:8025 tcp:8025 2>$null | Out-Null
+        if ($ok) {
+            $linked += $device
+            Write-Host "   $device : localhost:3000 et localhost:8025 renvoyés vers le PC"
+        } else {
+            # Android antérieur à 5.0 : adb reverse n'existe pas.
+            Write-Host "   $device : renvoi refusé (Android trop ancien pour adb reverse)" -ForegroundColor Yellow
+        }
+    }
+    $devices = $linked
+}
+
 Write-Host ''
 Write-Host 'Helvetik est démarré :' -ForegroundColor Green
 Write-Host '  Site et API      http://localhost:3000'
 Write-Host '  Console admin    http://localhost:3000/admin'
 Write-Host '  Swagger          http://localhost:3000/api-docs'
 Write-Host '  Mailpit          http://localhost:8025'
+Write-Host '  (si le navigateur force https sur localhost : http://127.0.0.1:3000)'
+if ($devices) {
+    Write-Host "  App Android      http://localhost:3000  ($($devices.Count) appareil(s) branché(s))"
+} else {
+    Write-Host '  App Android      aucun appareil branché : brancher, puis relancer ce script'
+}
