@@ -14,7 +14,9 @@ Sans Docker Desktop, avec Podman : `./start-podman.ps1` depuis le dossier
 `Server/` (PowerShell). Il démarre la machine Podman, son relais Windows — que
 `podman machine start` ne parvient pas à lancer tant que Docker Desktop est
 installé — puis la pile, et attend que l'API réponde. `./start-podman.ps1 --build`
-reconstruit l'image de l'API.
+reconstruit l'image de l'API. Il relie aussi les appareils Android branchés
+(`adb reverse`) : l'app s'y règle sur `http://localhost:3000`. Le renvoi tombe
+quand l'appareil est débranché ; relancer alors le script.
 
 | Service | Adresse |
 |---|---|
