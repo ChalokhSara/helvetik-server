@@ -8,18 +8,37 @@ import { PremiumYear } from '../models/premium.model';
 import { importWorkbook, ImportResult } from './premium-import.service';
 
 /**
- * Téléchargement des fichiers officiels depuis priminfo.admin.ch.
+ * Téléchargement des fichiers officiels de l'OFSP.
  *
- * Les trois URL sont stables d'une année sur l'autre — seul le fichier des
- * assureurs porte une date, reconstituée depuis l'année visée. Le contenu, lui,
- * est remplacé chaque année par l'OFSP.
+ * Depuis la publication des primes 2027 (automne 2026), les fichiers ne sont
+ * plus à des adresses fixes :
+ *   - le répertoire complet des primes a quitté priminfo pour opendata.swiss,
+ *     sous le nom `Prämien_CH.xlsx` et dans un nouveau format (cf. l'import) ;
+ *   - les régions et la liste des assureurs restent sur priminfo, mais leur
+ *     nom porte désormais l'année (`praemienregionen-2027.xlsx`) ou le mois
+ *     de publication (`assureurs-maladie-admis-2026-10.xlsx`).
+ *
+ * Les deux derniers sont donc relevés sur la page « Année de prime actuelle »
+ * de priminfo, qui pointe toujours vers les fichiers en vigueur. Les adresses
+ * reconstituées ne servent qu'en repli, si la page est injoignable.
  *
  * La synchronisation compare l'empreinte du fichier téléchargé à celle du
  * dernier import : rien n'est réimporté tant que l'OFSP n'a rien publié de neuf.
  */
 
 const BASE_URL = process.env.PRIMINFO_BASE_URL || 'https://www.priminfo.admin.ch';
+const DOWNLOADS_PAGE = `${BASE_URL}/fr/downloads/aktuell`;
+
+/**
+ * Répertoire des primes sur opendata.swiss (OFSP). Le chemin, encodé en base64
+ * dans l'adresse, est « /Praemien/Prämien_CH.xlsx » : l'OFSP y remplace le
+ * fichier chaque année sans en changer le nom.
+ */
+const PREMIUMS_URL = process.env.OFSP_PREMIUMS_URL ||
+  'https://opendata.bagnet.ch/?r=/download&path=L1ByYWVtaWVuL1Byw6RtaWVuX0NILnhsc3g%3D';
+
 const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+const PAGE_TIMEOUT_MS = 30 * 1000;
 
 export interface SyncOutcome {
   results: ImportResult[];
@@ -27,24 +46,52 @@ export interface SyncOutcome {
   errors: string[];
 }
 
-function sourceUrls(year: number): Array<{ kind: string; url: string; filename: string }> {
-  return [
-    {
-      kind: 'PREMIUMS',
-      url: `${BASE_URL}/downloads/gesamtbericht_ch.xlsx`,
-      filename: 'gesamtbericht_ch.xlsx'
-    },
-    {
-      kind: 'REGIONS',
-      url: `${BASE_URL}/downloads/praemienregionen.xlsx`,
-      filename: 'praemienregionen.xlsx'
-    },
-    {
-      // Seule URL datée : l'OFSP la publie au 1er janvier de l'année visée.
-      kind: 'INSURERS',
-      url: `${BASE_URL}/downloads/assureurs-maladie-admis-${year}-01-01.xlsx`,
-      filename: `assureurs-maladie-admis-${year}-01-01.xlsx`
+interface Source {
+  kind: string;
+  url: string;
+  filename: string;
+}
+
+/** Liens de la page priminfo : le premier qui correspond au motif. */
+export function findDownloadLink(html: string, pattern: RegExp): string | undefined {
+  for (const match of html.matchAll(/href="([^"]+)"/g)) {
+    if (pattern.test(match[1])) {
+      return new URL(match[1], BASE_URL).toString();
     }
+  }
+  return undefined;
+}
+
+async function fetchDownloadsPage(): Promise<string | undefined> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PAGE_TIMEOUT_MS);
+  try {
+    const response = await fetch(DOWNLOADS_PAGE, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Helvetik/1.0' }
+    });
+    return response.ok ? await response.text() : undefined;
+  } catch (err) {
+    console.error('[primes] page des téléchargements injoignable :', (err as Error).message);
+    return undefined;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function sourceUrls(year: number): Promise<Source[]> {
+  const page = await fetchDownloadsPage();
+
+  const regions = (page && findDownloadLink(page, /\/downloads\/praemienregionen-\d{4}\.xlsx$/)) ||
+    `${BASE_URL}/downloads/praemienregionen-${year}.xlsx`;
+  // Publiée chaque mois : la plus récente figure seule sur la page.
+  const insurers = (page && findDownloadLink(page, /\/downloads\/assureurs-maladie-admis-[\d-]+\.xlsx$/)) ||
+    `${BASE_URL}/downloads/assureurs-maladie-admis-${year}-01-01.xlsx`;
+
+  return [
+    { kind: 'PREMIUMS', url: PREMIUMS_URL, filename: 'Praemien_CH.xlsx' },
+    { kind: 'REGIONS', url: regions, filename: regions.split('/').pop() as string },
+    { kind: 'INSURERS', url: insurers, filename: insurers.split('/').pop() as string }
   ];
 }
 
@@ -71,8 +118,9 @@ async function download(url: string, destination: string): Promise<void> {
 /**
  * Récupère les fichiers de l'OFSP et les importe.
  *
- * L'année visée sert uniquement à construire l'URL du fichier des assureurs :
- * l'année réelle des données est toujours lue dans les fichiers eux-mêmes.
+ * L'année visée ne sert qu'aux adresses de repli, quand la page de priminfo
+ * est injoignable : l'année réelle des données est toujours lue dans les
+ * fichiers eux-mêmes.
  */
 export async function syncPremiumsFromOfsp(options: {
   targetYear?: number;
@@ -90,7 +138,7 @@ export async function syncPremiumsFromOfsp(options: {
 
   const outcome: SyncOutcome = { results: [], skipped: [], errors: [] };
 
-  for (const source of sourceUrls(year)) {
+  for (const source of await sourceUrls(year)) {
     const destination = join(workDir, `${Date.now()}-${source.filename}`);
     try {
       await download(source.url, destination);

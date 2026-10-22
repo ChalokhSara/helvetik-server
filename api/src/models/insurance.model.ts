@@ -40,7 +40,7 @@ export type TariffType = typeof TARIFF_TYPES[number];
 
 export const TARIFF_TYPE_LABELS: Record<TariffType, string> = {
   BASE: 'Standard (libre choix du médecin)',
-  HAM: 'Médecin de famille',
+  HAM: 'Médecin de famille ou HMO',
   HMO: 'HMO (cabinet de groupe)',
   DIV: 'Autre (télémédecine, pharmacie…)'
 };
