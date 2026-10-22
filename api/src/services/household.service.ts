@@ -232,3 +232,66 @@ export async function buildHouseholdContext(
     warnings
   };
 }
+
+/** Normalisation pour comparer des noms : sans accents, ni casse, ni ponctuation. */
+function nameKey(value: string): string {
+  return value.normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * Retrouve l'assuré désigné par une police, par son nom ou sa date de naissance.
+ *
+ * Beaucoup de polices ne portent aucun numéro AVS — celle de Sanitas n'en a
+ * pas — mais toutes nomment la personne assurée. Le nom suffit dans un foyer,
+ * où l'on ne compte pas deux homonymes ; la date de naissance sert d'appoint
+ * quand la reconnaissance de texte a abîmé l'orthographe.
+ */
+export async function matchInsured(
+  userUid: string,
+  name?: string,
+  birthdate?: string
+): Promise<IClient | null> {
+  const clients = await Client.find({ userUid });
+  if (!clients.length) {
+    return null;
+  }
+
+  if (name) {
+    const wanted = nameKey(name);
+    const parts = wanted.split(' ').filter((part) => part.length >= 3);
+
+    // Le nom complet d'abord, dans les deux ordres : les polices écrivent
+    // aussi bien « Sara Chalokh » que « Chalokh Sara ».
+    const exact = clients.find((client) => {
+      const full = nameKey([client.firstname, client.name].filter(Boolean).join(' '));
+      const reversed = nameKey([client.name, client.firstname].filter(Boolean).join(' '));
+      return full === wanted || reversed === wanted;
+    });
+    if (exact) {
+      return exact;
+    }
+
+    // À défaut, tous les mots significatifs du nom de l'assuré doivent
+    // apparaître : « Sara Caroline Chalokh » reconnaît « Sara Chalokh ».
+    const partial = clients.filter((client) => {
+      const full = ` ${nameKey([client.firstname, client.name].filter(Boolean).join(' '))} `;
+      return parts.length > 0 && parts.every((part) => full.includes(` ${part} `));
+    });
+    if (partial.length === 1) {
+      return partial[0];
+    }
+  }
+
+  // Dernier recours : la date de naissance, si elle ne désigne qu'une personne.
+  if (birthdate) {
+    const day = new Date(birthdate);
+    const sameDay = clients.filter((client) => client.birthdate &&
+      client.birthdate.toISOString().slice(0, 10) === day.toISOString().slice(0, 10));
+    if (sameDay.length === 1) {
+      return sameDay[0];
+    }
+  }
+
+  return null;
+}

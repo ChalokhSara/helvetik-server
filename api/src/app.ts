@@ -17,6 +17,7 @@ import { authRouter } from './routes/auth.routes';
 import { clientsRouter } from './routes/clients.routes';
 import { insurancesRouter } from './routes/insurances.routes';
 import { comparisonRouter } from './routes/comparison.routes';
+import { lamalRouter } from './routes/lamal.routes';
 import { adminRouter } from './routes/admin.routes';
 import { siteRouter } from './routes/site.routes';
 import { healthcheckRouter } from './routes/healthcheck';
@@ -84,6 +85,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/clients', clientsRouter);
 app.use('/api/insurances', insurancesRouter);
 app.use('/api/comparison', comparisonRouter);
+app.use('/api/lamal', lamalRouter);
 app.use('/admin', adminRouter);
 // Le site des assurés est monté en dernier : il occupe la racine et ne doit
 // masquer ni l'API, ni la console, ni la documentation.

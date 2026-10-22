@@ -118,8 +118,9 @@ ${alertBlock(options.error, options.notice)}
       <h2 style="margin:0 0 .5rem;font-size:1.1rem">Mettre à jour les données</h2>
       <p class="muted">
         Trois fichiers publiés chaque année par l'OFSP : le répertoire complet des primes
-        (<code>gesamtbericht_ch.xlsx</code>), les régions de primes
-        (<code>praemienregionen.xlsx</code>) et la liste des assureurs admis. Ils se déposent
+        (<code>Prämien_CH.xlsx</code> sur opendata.swiss ; <code>gesamtbericht_ch.xlsx</code>
+        avant 2027), les régions de primes (<code>praemienregionen-AAAA.xlsx</code>) et la
+        liste des assureurs admis. Ils se déposent
         un par un, dans n'importe quel ordre : chacun est reconnu à sa structure.
       </p>
 

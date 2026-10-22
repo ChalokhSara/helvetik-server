@@ -665,7 +665,7 @@ ${rows}
 /** Libellé des modèles d'assurance alternatifs, pour le filtre de comparaison. */
 const TARIFF_TYPE_LABELS: Record<TariffType, string> = {
   BASE: 'Modèle standard',
-  HAM: 'Médecin de famille',
+  HAM: 'Médecin de famille ou HMO',
   HMO: 'HMO',
   DIV: 'Télémédecine / autre'
 };

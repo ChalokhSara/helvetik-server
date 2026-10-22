@@ -94,6 +94,20 @@ export function cancellationDeadlineFor(effectiveYear: number): Date {
   return new Date(Date.UTC(effectiveYear - 1, 10, 30));
 }
 
+/**
+ * Année visée par le changement.
+ *
+ * Tant que l'échéance de novembre n'est pas passée, le changement porte sur
+ * l'année suivante. Après, il ne peut plus viser que celle d'après : une
+ * résiliation reçue en décembre prend effet un an plus tard.
+ */
+export function targetYear(now = new Date()): number {
+  const nextYear = now.getFullYear() + 1;
+  return now.getTime() <= cancellationDeadlineFor(nextYear).getTime()
+    ? nextYear
+    : nextYear + 1;
+}
+
 export function letterTitle(kind: LetterKind, effectiveYear: number): string {
   return kind === 'CANCELLATION'
     ? `Résiliation de l'assurance obligatoire des soins au 31.12.${effectiveYear - 1}`

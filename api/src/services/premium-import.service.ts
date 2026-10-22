@@ -16,7 +16,7 @@ import {
 /**
  * Import des fichiers officiels de l'OFSP.
  *
- * Les classeurs sont lus en flux : `gesamtbericht_ch.xlsx` pèse 15 Mo
+ * Les classeurs sont lus en flux : le répertoire des primes pèse 13 à 15 Mo
  * compressés pour 131 Mo de XML et 217 000 lignes, qu'il serait absurde de
  * charger entièrement en mémoire.
  */
@@ -46,27 +46,66 @@ export interface ImportResult {
 }
 
 /** « PR-REG CH2 » → 2 ; les cantons à région unique portent « CH0 ». */
+/*
+ * Deux nomenclatures coexistent. Jusqu'aux primes 2026, le répertoire
+ * `gesamtbericht_ch.xlsx` codait « PR-REG CH1 », « AKL-ERW », « FRA-2500 »,
+ * « TAR-HAM ». Depuis les primes 2027, l'OFSP publie `Prämien_CH.xlsx` sur
+ * opendata.swiss avec « PR_REG_1 », « AKA_03_ERW », « FRA_06_E_2500 » et de
+ * nouvelles familles de modèles. Les deux sont lues, pour pouvoir réimporter
+ * une année archivée comme l'année en cours.
+ */
+
+/** « PR-REG CH1 » ou « PR_REG_1 » → 1. */
 function parseRegion(raw: unknown): number | null {
-  const match = String(raw ?? '').match(/CH(\d)/);
+  const match = String(raw ?? '').match(/(?:CH|PR_REG_)(\d)/);
   return match ? Number(match[1]) : null;
 }
 
-/** « FRA-2500 » → 2500. */
+/** « FRA-2500 » ou « FRA_06_E_2500 » → 2500. */
 function parseFranchise(raw: unknown): number | null {
-  const match = String(raw ?? '').match(/FRA-(\d+)/);
+  const match = String(raw ?? '').match(/^FRA(?:-|_\d+_[A-Z]_)(\d+)$/);
   return match ? Number(match[1]) : null;
 }
 
-/** « AKL-KIN » → « KIN ». */
+/** « AKL-KIN » ou « AKA_01_KIN » → « KIN ». */
 function parseAgeClass(raw: unknown): AgeClass | null {
-  const match = String(raw ?? '').match(/AKL-(KIN|JUG|ERW)/);
+  const match = String(raw ?? '').match(/AK[LA][-_](?:\d+_)?(KIN|JUG|ERW)/);
   return match ? (match[1] as AgeClass) : null;
 }
 
-/** « TAR-HAM » → « HAM ». */
+/**
+ * Familles de modèles publiées depuis 2027, ramenées aux quatre familles
+ * historiques que tout le reste du service connaît.
+ *
+ * La correspondance a été établie en croisant les codes de tarif présents
+ * dans les deux fichiers : « PRAXIS » réunit les anciens HAM et HMO (médecin
+ * de famille, cabinet de groupe), « TEL_DIG » (télémédecine) et « FLEX »
+ * (modèles combinés : médecin, télémédecine ou pharmacie au choix) étaient
+ * classés dans DIV — à quelques exceptions près, rangées autrefois en HAM.
+ */
+const TARIFF_FAMILIES_2027: Record<string, TariffType> = {
+  BASE: 'BASE',
+  PRAXIS: 'HAM',
+  TEL_DIG: 'DIV',
+  FLEX: 'DIV'
+};
+
+/** « TAR-HAM » → « HAM » ; « PRAXIS » → « HAM ». */
 function parseTariffType(raw: unknown): TariffType | null {
-  const match = String(raw ?? '').match(/TAR-(BASE|HAM|HMO|DIV)/);
-  return match ? (match[1] as TariffType) : null;
+  const value = String(raw ?? '').trim();
+  const legacy = value.match(/TAR-(BASE|HAM|HMO|DIV)/);
+  if (legacy) {
+    return legacy[1] as TariffType;
+  }
+  return TARIFF_FAMILIES_2027[value] ?? null;
+}
+
+/**
+ * Feuille des primes : « Export » dans l'ancien fichier, « Sheet1 » dans le
+ * nouveau. Elle se reconnaît plus sûrement à son en-tête qu'à son nom.
+ */
+function isPremiumHeader(values: unknown[]): boolean {
+  return cellText(values[1]) === 'Versicherer' && cellText(values[14]).startsWith('Pr');
 }
 
 /** Les cellules Excel peuvent être des nombres, des chaînes ou du texte enrichi. */
@@ -154,10 +193,14 @@ export async function detectWorkbookKind(path: string): Promise<SourceKind | nul
       return 'INSURERS';
     }
     // Le fichier des régions n'a que des feuilles « SheetN » ; on l'identifie
-    // à l'en-tête A_COM/B_NPA de sa cinquième feuille.
+    // à l'en-tête A_COM/B_NPA de sa cinquième feuille. Le nouveau répertoire
+    // des primes, lui aussi en « Sheet1 », se reconnaît à ses colonnes.
     for await (const row of sheet) {
-      const first = cellText(row.values ? (row.values as unknown[])[1] : '');
-      if (/^(A_COM|B_NPA)/.test(first)) {
+      const values = (row.values as unknown[]) || [];
+      if (isPremiumHeader(values)) {
+        return 'PREMIUMS';
+      }
+      if (/^(A_COM|B_NPA)/.test(cellText(values[1]))) {
         return 'REGIONS';
       }
       break;
@@ -208,14 +251,18 @@ async function importPremiums(path: string, options: ImportOptions): Promise<Imp
       continue;
     }
 
-    if (current !== 'export') {
-      continue;
-    }
-
     let first = true;
+    let isPremiumSheet = current === 'export';
     for await (const row of sheet) {
-      if (first) { first = false; continue; }
       const v = row.values as unknown[];
+      if (first) {
+        first = false;
+        isPremiumSheet = isPremiumSheet || isPremiumHeader(v || []);
+        if (!isPremiumSheet) {
+          break;
+        }
+        continue;
+      }
 
       const rowYear = cellNumber(v[4]);
       const insurerId = cellNumber(v[1]);
@@ -262,7 +309,8 @@ async function importPremiums(path: string, options: ImportOptions): Promise<Imp
         withAccident: accident.includes('MIT'),
         tariffType,
         tariffCode,
-        tariffName: tariffNames.get(tariffCode),
+        // Le nouveau fichier n'a plus de dictionnaire : le nom figure sur chaque ligne.
+        tariffName: cellText(v[17]) || tariffNames.get(tariffCode),
         franchise,
         premium,
         isBase: cellNumber(v[15]) === 1
@@ -542,6 +590,18 @@ async function importInsurers(path: string, options: ImportOptions): Promise<Imp
   if (year === null) {
     throw new Error('Année introuvable dans le fichier des assureurs admis.');
   }
+
+  // L'OFSP publie la liste chaque mois. Celle d'octobre 2026 est celle qui
+  // accompagne les primes 2027, publiées en septembre : sans ce rattachement,
+  // les primes de l'année suivante resteraient sans nom de caisse ni adresse
+  // jusqu'à la liste de janvier. Le décalage n'est appliqué que si les primes
+  // de l'année suivante sont déjà là — l'import des primes précède donc celui
+  // des assureurs, dans la synchronisation comme dans la console.
+  const following = await PremiumYear.exists({ year: year + 1, premiumRows: { $gt: 0 } });
+  if (following) {
+    year += 1;
+  }
+
   if (!shortNames.size && !details.size) {
     throw new Error('Aucun assureur trouvé dans ce fichier.');
   }
@@ -645,7 +705,8 @@ export async function importWorkbook(path: string, options: ImportOptions): Prom
 
     if (!kind) {
       throw new Error(
-        'Fichier non reconnu. Attendu : le répertoire des primes (feuille « Export »), ' +
+        'Fichier non reconnu. Attendu : le répertoire des primes (Prämien_CH.xlsx ou, avant 2027, ' +
+        'gesamtbericht_ch.xlsx), ' +
         'les régions de primes (feuille « B_NPA ») ou les assureurs admis (feuille « Indice »).'
       );
     }
