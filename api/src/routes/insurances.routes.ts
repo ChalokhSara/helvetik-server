@@ -1,4 +1,7 @@
 import { Router, Request, Response } from 'express';
+import multer from 'multer';
+import { tmpdir } from 'os';
+import { unlink } from 'fs/promises';
 import { Client, IClient } from '../models/client.model';
 import {
   Insurance,
@@ -12,10 +15,14 @@ import { requireUser } from '../middleware/require-user';
 import { escapeRegex } from '../utils/query';
 import { describeApiError } from '../utils/errors';
 import {
+  cancellationDeadline,
   monthlyPremium,
   readInsurancePayload,
   serializeInsurance
 } from '../utils/insurance-payload';
+import { REMINDER_MILESTONES } from '../models/notification.model';
+import { isSupportedDocument } from '../services/document-extraction.service';
+import { scanPolicy } from '../services/policy-scan.service';
 
 const router = Router();
 
@@ -33,6 +40,16 @@ const SORTABLE: Record<string, string> = {
   provider: 'provider',
   type: 'type'
 };
+
+/** Une photo de téléphone dépasse rarement quelques mégaoctets. */
+const MAX_SCAN_BYTES = 15 * 1024 * 1024;
+
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
+
+const upload = multer({
+  dest: tmpdir(),
+  limits: { fileSize: MAX_SCAN_BYTES, files: 1 }
+});
 
 router.use(requireUser);
 
@@ -387,6 +404,158 @@ router.get('/filters', async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error('Erreur de chargement des filtres:', err);
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Erreur serveur.' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/insurances/scan:
+ *   post:
+ *     summary: Lire une police photographiée ou un PDF
+ *     description: >
+ *       Reconnaissance de texte puis analyse du document. Rien n'est
+ *       enregistré : la réponse est un brouillon à faire vérifier par
+ *       l'assuré, puis à envoyer à POST /api/insurances. Tous les types
+ *       d'assurance sont acceptés ; seule une police LAMal passe par la
+ *       lecture assistée, validée contre le catalogue officiel.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [document]
+ *             properties:
+ *               document: { type: string, format: binary }
+ *               type: { type: string, description: Type connu de l'assuré, sinon deviné }
+ *     responses:
+ *       200: { description: Brouillon de contrat }
+ *       400: { description: Fichier absent ou format non pris en charge }
+ *       413: { description: Fichier trop lourd }
+ *       422: { description: Document illisible }
+ */
+router.post('/scan', (req: Request, res: Response) => {
+  upload.single('document')(req, res, async (uploadErr: unknown) => {
+    if (uploadErr instanceof multer.MulterError) {
+      const tooLarge = uploadErr.code === 'LIMIT_FILE_SIZE';
+      return res.status(tooLarge ? 413 : 400).json({
+        code: tooLarge ? 'FILE_TOO_LARGE' : 'INVALID_UPLOAD',
+        message: tooLarge
+          ? `Le fichier dépasse ${Math.round(MAX_SCAN_BYTES / (1024 * 1024))} Mo.`
+          : 'Envoyez un seul fichier, dans le champ « document ».'
+      });
+    }
+    if (uploadErr) {
+      console.error('Erreur de réception de document:', uploadErr);
+      return res.status(500).json({ code: 'SERVER_ERROR', message: 'Erreur serveur.' });
+    }
+
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ code: 'FILE_REQUIRED', message: 'Aucun fichier reçu.' });
+    }
+
+    try {
+      if (!isSupportedDocument(file.mimetype, file.originalname)) {
+        return res.status(400).json({
+          code: 'UNSUPPORTED_FORMAT',
+          message: 'Format non pris en charge : envoyez une photo (JPEG, PNG, HEIC) ou un PDF.'
+        });
+      }
+
+      const rawType = String(req.body?.type || '').trim().toUpperCase();
+      if (rawType && !INSURANCE_TYPES.includes(rawType as InsuranceType)) {
+        return res.status(400).json({
+          code: 'INVALID_TYPE',
+          message: `Type d'assurance inconnu. Valeurs acceptées : ${INSURANCE_TYPES.join(', ')}.`
+        });
+      }
+
+      const scan = await scanPolicy({
+        userUid: req.authUser!.uid,
+        path: file.path,
+        mimetype: file.mimetype,
+        filename: file.originalname,
+        requestedType: (rawType || undefined) as InsuranceType | undefined
+      });
+      res.json(scan);
+    } catch (err) {
+      // Les erreurs de lecture portent déjà un message destiné à l'assuré.
+      res.status(422).json({ code: 'UNREADABLE_DOCUMENT', message: (err as Error).message });
+    } finally {
+      await unlink(file.path).catch(() => undefined);
+    }
+  });
+});
+
+/**
+ * @swagger
+ * /api/insurances/deadlines:
+ *   get:
+ *     summary: Échéances à venir du foyer
+ *     description: >
+ *       Pour chaque contrat en vigueur, la prochaine date qui demande une
+ *       action : la limite de résiliation quand un préavis est connu (pour la
+ *       LAMal, toujours le 30 novembre), sinon le terme d'un contrat qui ne se
+ *       reconduit pas. Les dates de rappel suivent les paliers du serveur
+ *       (90, 30 et 7 jours avant), pour que l'application planifie ses
+ *       notifications locales les mêmes jours que les emails.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200: { description: Échéances triées de la plus proche à la plus lointaine }
+ */
+router.get('/deadlines', async (req: Request, res: Response) => {
+  const user = req.authUser!;
+
+  try {
+    const [insurances, clients] = await Promise.all([
+      Insurance.find({ userUid: user.uid, status: 'ACTIVE' }),
+      Client.find({ userUid: user.uid })
+    ]);
+    const clientsByUid = new Map<string, IClient>(clients.map((c) => [c.uid, c]));
+    const now = new Date();
+    const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+
+    const deadlines = insurances.flatMap((insurance) => {
+      const cancellation = cancellationDeadline(insurance);
+      // Sans préavis, seul un contrat qui s'arrête de lui-même a une date à signaler.
+      const date = cancellation ?? (insurance.autoRenew ? undefined : insurance.endDate);
+      if (!date) {
+        return [];
+      }
+      const daysLeft = Math.round((date.getTime() - today) / MS_PER_DAY);
+      if (daysLeft < 0) {
+        return [];
+      }
+
+      const client = clientsByUid.get(insurance.clientUid);
+      return [{
+        insuranceUid: insurance.uid,
+        kind: cancellation ? 'CANCELLATION' : 'EXPIRY',
+        type: insurance.type,
+        provider: insurance.provider,
+        productName: insurance.productName,
+        policyNumber: insurance.policyNumber,
+        insured: client
+          ? { uid: client.uid, name: client.name, firstname: client.firstname }
+          : { uid: insurance.clientUid },
+        endDate: insurance.endDate,
+        deadline: date,
+        daysLeft,
+        reminders: REMINDER_MILESTONES
+          .map((days) => ({ daysBefore: days, date: new Date(date.getTime() - days * MS_PER_DAY) }))
+          .filter((reminder) => reminder.date.getTime() >= today)
+      }];
+    });
+
+    deadlines.sort((a, b) => a.deadline.getTime() - b.deadline.getTime());
+    res.json({ milestones: REMINDER_MILESTONES, deadlines });
+  } catch (err) {
+    console.error('Erreur de calcul des échéances:', err);
     res.status(500).json({ code: 'SERVER_ERROR', message: 'Erreur serveur.' });
   }
 });

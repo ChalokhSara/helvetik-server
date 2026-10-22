@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { Client } from '../models/client.model';
+import { Insurance } from '../models/insurance.model';
+import { IdentityDocument } from '../models/identity-document.model';
 import { describeApiError } from '../utils/errors';
 import { readClientPayload, serializeClient } from '../utils/client-payload';
 import { requireUser } from '../middleware/require-user';
@@ -100,6 +102,118 @@ router.post('/', async (req: Request, res: Response) => {
     console.error('Erreur de création de client:', err);
     const described = describeApiError(err, 'Ce client existe déjà.');
     res.status(described.status).json({ code: described.code, message: described.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/clients/{uid}:
+ *   put:
+ *     summary: Modifier un assuré du foyer
+ *     description: >
+ *       Remplace la fiche de l'assuré. Même corps que la création ; les champs
+ *       facultatifs omis sont effacés.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: uid
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: Assuré mis à jour }
+ *       400: { description: Données invalides }
+ *       404: { description: Introuvable dans ce foyer }
+ */
+router.put('/:uid', async (req: Request, res: Response) => {
+  const user = req.authUser!;
+
+  const payload = readClientPayload(req.body, { email: user.email });
+  if (payload.error || !payload.values) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: payload.error });
+  }
+  const values = payload.values;
+
+  try {
+    const client = await Client.findOne({ uid: req.params.uid, userUid: user.uid });
+    if (!client) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Assuré introuvable.' });
+    }
+
+    // Le titulaire reste le contact du compte : son numéro ne peut pas disparaître.
+    const holder = await Client.findOne({ userUid: user.uid }).sort({ _id: 1 });
+    if (!values.phone && holder?.uid === client.uid) {
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: PHONE_REQUIRED_MESSAGE });
+    }
+
+    client.set({
+      name: values.name,
+      firstname: values.firstname,
+      birthdate: values.birthdate,
+      nationality: values.nationality,
+      sexe: values.sexe,
+      email: values.email,
+      phone: values.phone,
+      road: values.road,
+      plz: values.plz,
+      location: values.location,
+      canton: values.canton,
+      avsNum: values.avsNum
+    });
+    await client.save();
+    res.json({ client: serializeClient(client) });
+  } catch (err) {
+    console.error('Erreur de mise à jour de client:', err);
+    const described = describeApiError(err, 'Ce client existe déjà.');
+    res.status(described.status).json({ code: described.code, message: described.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/clients/{uid}:
+ *   delete:
+ *     summary: Retirer un assuré du foyer
+ *     description: >
+ *       Le titulaire du compte ne peut pas être retiré, ni un assuré qui porte
+ *       encore des contrats : ils seraient sinon rattachés à personne.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       204: { description: Retiré }
+ *       404: { description: Introuvable dans ce foyer }
+ *       409: { description: Titulaire du compte, ou contrats encore rattachés }
+ */
+router.delete('/:uid', async (req: Request, res: Response) => {
+  const user = req.authUser!;
+
+  try {
+    const client = await Client.findOne({ uid: req.params.uid, userUid: user.uid });
+    if (!client) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Assuré introuvable.' });
+    }
+
+    const holder = await Client.findOne({ userUid: user.uid }).sort({ _id: 1 });
+    if (holder?.uid === client.uid) {
+      return res.status(409).json({
+        code: 'HOLDER_REQUIRED',
+        message: 'Le titulaire du compte ne peut pas être retiré.'
+      });
+    }
+    if (await Insurance.exists({ userUid: user.uid, clientUid: client.uid })) {
+      return res.status(409).json({
+        code: 'HAS_INSURANCES',
+        message: 'Cet assuré a encore des contrats : supprimez-les ou rattachez-les à quelqu\'un d\'autre.'
+      });
+    }
+
+    // Ses pièces d'identité n'ont plus de raison d'être conservées.
+    await IdentityDocument.deleteMany({ clientUid: client.uid });
+    await Client.deleteOne({ _id: client._id });
+    res.status(204).send();
+  } catch (err) {
+    console.error('Erreur de suppression de client:', err);
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Erreur serveur.' });
   }
 });
 
