@@ -68,7 +68,7 @@ x-api-env: &api-env
   OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
   OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
   OLLAMA_ENABLED: ${OLLAMA_ENABLED:-true}
-  OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-90000}
+  OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-150000}
 
   # Envoi des courriers par ePost (oneAPI de la Poste).
   #

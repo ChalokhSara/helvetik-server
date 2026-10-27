@@ -35,7 +35,8 @@ export interface ExtractedField<T = string> {
 }
 
 export interface ExtractionResult {
-  source: 'PDF' | 'IMAGE';
+  /** TEXT : texte déjà reconnu sur le téléphone, sans document joint. */
+  source: 'PDF' | 'IMAGE' | 'TEXT';
   /** Longueur du texte lu, utile pour distinguer un scan illisible d'un échec. */
   characters: number;
   /**
@@ -61,8 +62,15 @@ export interface ExtractionResult {
   warnings: string[];
 }
 
-/** Pages d'un PDF scanné soumises à la reconnaissance : une pièce ou une police tient en deux. */
-const SCANNED_PDF_PAGES = 2;
+/**
+ * Pages d'un PDF scanné soumises à la reconnaissance optique.
+ *
+ * Un contrat dépasse souvent dix pages. La limite ne sert qu'à borner le
+ * temps de traitement — Tesseract met 5 à 10 s par page — sur ce chemin-ci,
+ * celui du web et du bureau : l'application mobile lit le texte elle-même,
+ * sans limite, et n'envoie que lui.
+ */
+const SCANNED_PDF_PAGES = 40;
 
 /** Taille visée pour le plus grand côté d'une image avant reconnaissance. */
 const OCR_TARGET_SIDE = 2400;
@@ -92,8 +100,16 @@ async function readDocument(path: string, isPdf: boolean): Promise<DocumentText>
   const { PDFParse } = await import('pdf-parse');
   const parser = new PDFParse({ data: await readFile(path) });
   try {
-    const text = String((await parser.getText()).text || '');
-    if (text.replace(/\s+/g, '').length >= 20) {
+    const content = await parser.getText();
+    const text = String(content.text || '');
+    // pdf-parse insère « -- 1 of 4 -- » entre les pages : sur un PDF scanné,
+    // ces marqueurs suffisaient à faire croire à une couche texte, et la
+    // reconnaissance optique n'était jamais lancée. Seul le texte réel compte,
+    // et il en faut un minimum par page — une police scannée n'a parfois
+    // qu'un en-tête en texte.
+    const real = text.replace(/--\s*\d+\s+of\s+\d+\s*--/g, '').replace(/\s+/g, '');
+    const pages = Math.max(1, content.pages?.length ?? content.total ?? 1);
+    if (real.length >= 20 * pages) {
       return { text };
     }
     // Rendu large : une carte scannée sur une page A4 n'en occupe qu'une partie.
@@ -758,13 +774,38 @@ export async function extractFromDocument(
     );
   }
 
+  return analyseText(text, {
+    source: isPdf ? 'PDF' : 'IMAGE',
+    mrzText,
+    warnings,
+    littleText: isPdf
+      ? 'Très peu de texte a été reconnu dans ce PDF : le scan est peut-être trop pâle ou de trop basse résolution.'
+      : 'Très peu de texte a été reconnu sur l\'image.'
+  });
+}
+
+/**
+ * Repérage des champs dans un texte déjà lu.
+ *
+ * Séparé de la lecture du document pour servir aussi au texte reconnu sur le
+ * téléphone : l'application fait alors la reconnaissance optique elle-même, bien
+ * meilleure que Tesseract sur une photo, et n'envoie que le texte.
+ */
+export async function analyseText(
+  text: string,
+  options: {
+    source: ExtractionResult['source'];
+    mrzText?: string;
+    warnings?: string[];
+    littleText?: string;
+  }
+): Promise<ExtractionResult> {
+  const warnings = options.warnings ?? [];
+  const mrzText = options.mrzText;
+
   const compact = text.replace(/[ \t]+/g, ' ');
   if (compact.trim().length < 20) {
-    warnings.push(
-      isPdf
-        ? 'Très peu de texte a été reconnu dans ce PDF : le scan est peut-être trop pâle ou de trop basse résolution.'
-        : 'Très peu de texte a été reconnu sur l\'image.'
-    );
+    warnings.push(options.littleText ?? 'Très peu de texte a été reconnu sur le document.');
   }
 
   const locality = findLocality(compact);
@@ -794,7 +835,7 @@ export async function extractFromDocument(
   }
 
   return {
-    source: isPdf ? 'PDF' : 'IMAGE',
+    source: options.source,
     characters: compact.trim().length,
     text: compact,
     fields,

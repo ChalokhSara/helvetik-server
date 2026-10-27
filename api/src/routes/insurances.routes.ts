@@ -22,7 +22,7 @@ import {
 } from '../utils/insurance-payload';
 import { REMINDER_MILESTONES } from '../models/notification.model';
 import { isSupportedDocument } from '../services/document-extraction.service';
-import { scanPolicy } from '../services/policy-scan.service';
+import { scanPolicy, scanPolicyText } from '../services/policy-scan.service';
 
 const router = Router();
 
@@ -41,8 +41,8 @@ const SORTABLE: Record<string, string> = {
   type: 'type'
 };
 
-/** Une photo de téléphone dépasse rarement quelques mégaoctets. */
-const MAX_SCAN_BYTES = 15 * 1024 * 1024;
+/** Un contrat scanné de vingt pages pèse une quinzaine de mégaoctets : marge comprise. */
+const MAX_SCAN_BYTES = 50 * 1024 * 1024;
 
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
@@ -489,6 +489,69 @@ router.post('/scan', (req: Request, res: Response) => {
       await unlink(file.path).catch(() => undefined);
     }
   });
+});
+
+/**
+ * Un contrat de plusieurs dizaines de pages fait 100 000 à 150 000 caractères.
+ * La borne protège seulement contre un envoi aberrant.
+ */
+const MAX_SCAN_TEXT_CHARS = 300_000;
+
+/**
+ * @swagger
+ * /api/insurances/scan-text:
+ *   post:
+ *     summary: Lire une police à partir du texte reconnu sur le téléphone
+ *     description: >
+ *       Même analyse que /api/insurances/scan, mais l'application a fait la
+ *       reconnaissance de texte elle-même : seul le texte est envoyé. Rien
+ *       n'est enregistré.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [text]
+ *             properties:
+ *               text: { type: string, maxLength: 30000 }
+ *               type: { type: string, description: Type connu de l'assuré, sinon deviné }
+ *     responses:
+ *       200: { description: Brouillon de contrat }
+ *       400: { description: Texte absent, trop long, ou type inconnu }
+ */
+router.post('/scan-text', async (req: Request, res: Response) => {
+  const text = typeof req.body?.text === 'string' ? req.body.text : '';
+  if (!text.trim()) {
+    return res.status(400).json({ code: 'TEXT_REQUIRED', message: 'Aucun texte reçu.' });
+  }
+  if (text.length > MAX_SCAN_TEXT_CHARS) {
+    return res.status(400).json({
+      code: 'TEXT_TOO_LONG',
+      message: `Le texte dépasse ${MAX_SCAN_TEXT_CHARS} caractères : ce document est trop long pour une police.`
+    });
+  }
+
+  const rawType = String(req.body?.type || '').trim().toUpperCase();
+  if (rawType && !INSURANCE_TYPES.includes(rawType as InsuranceType)) {
+    return res.status(400).json({
+      code: 'INVALID_TYPE',
+      message: `Type d'assurance inconnu. Valeurs acceptées : ${INSURANCE_TYPES.join(', ')}.`
+    });
+  }
+
+  try {
+    res.json(await scanPolicyText({
+      userUid: req.authUser!.uid,
+      text,
+      requestedType: (rawType || undefined) as InsuranceType | undefined
+    }));
+  } catch (err) {
+    console.error('Erreur de lecture de texte de police:', err);
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Erreur serveur.' });
+  }
 });
 
 /**

@@ -41,7 +41,8 @@ const DEFAULT_URL = 'http://ollama:11434';
  * JSON demandé, pour environ 5 Go de mémoire au lieu de 2.
  */
 const DEFAULT_MODEL = 'qwen2.5:7b';
-const DEFAULT_TIMEOUT_MS = 90_000;
+/** Une police dense prend 85 s sur processeur ; la marge couvre une machine chargée. */
+const DEFAULT_TIMEOUT_MS = 150_000;
 
 /**
  * Fenêtre de contexte demandée à Ollama.
@@ -260,9 +261,17 @@ async function ask<T>(prompt: string, maxTokens: number): Promise<AskResult<T>> 
     return { value: JSON.parse(raw) as T, truncated };
   } catch {
     // Ceinture et bretelles : `format: json` peut être ignoré par un modèle
-    // ancien, on récupère alors le premier objet du texte.
-    const match = raw.match(/\{[\s\S]*\}/);
-    return { value: match ? JSON.parse(match[0]) as T : null, truncated };
+    // ancien, on récupère alors le premier objet complet du texte — même suivi
+    // d'une accolade de trop, qu'un petit modèle ajoute volontiers.
+    const start = raw.indexOf('{');
+    for (let end = raw.indexOf('}', start); start >= 0 && end > start; end = raw.indexOf('}', end + 1)) {
+      try {
+        return { value: JSON.parse(raw.slice(start, end + 1)) as T, truncated };
+      } catch {
+        // Objet encore incomplet : on essaie l'accolade fermante suivante.
+      }
+    }
+    return { value: null, truncated };
   }
 }
 
@@ -1111,16 +1120,48 @@ const TYPE_GUIDE: Record<InsuranceType, string> = {
   AUTRE: 'tout autre contrat d\'assurance'
 };
 
-/** Mêmes filtres que pour la LAMal, sans couper le document à sa partie de base. */
+/** En-tête toujours conservé : il porte l'assureur, le preneur et souvent le numéro. */
+const HEADER_LINES = 20;
+
+/** Lignes qui portent les données d'un contrat, où qu'elles soient dans le document. */
+const KEY_LINE = /\d|police|contrat|prime|pr[äa]mie|[ée]ch[ée]ance|r[ée]siliation|k[üu]ndigung|franchise|selbstbehalt|somme|montant|dur[ée]e|valable|g[üu]ltig|preneur|assur[ée]/i;
+
+/**
+ * Extrait envoyé au modèle, quelle que soit la longueur du contrat.
+ *
+ * Un contrat de quinze pages ne tient pas dans la fenêtre du modèle, et ses
+ * données utiles ne sont pas toutes au début : le décompte de prime figure
+ * parfois en troisième page. On garde donc l'en-tête, puis les lignes qui
+ * portent des chiffres ou des mots clés, dans l'ordre du document, jusqu'à
+ * remplir le budget. Les conditions générales, longues et sans chiffres,
+ * tombent d'elles-mêmes.
+ */
 function policyExcerpt(text: string): string {
-  return text
+  const lines = text
     .split(/\r?\n/)
     .map((line) => line.replace(/\s+/g, ' ').trim())
     .filter(Boolean)
     .filter((line) => !BOILERPLATE.test(line))
-    .filter((line) => !(line.length > 160 && !/\d/.test(line)))
-    .join('\n')
-    .slice(0, MAX_EXCERPT_CHARS);
+    .filter((line) => !(line.length > 160 && !/\d/.test(line)));
+
+  const all = lines.join('\n');
+  if (all.length <= MAX_EXCERPT_CHARS) {
+    return all;
+  }
+
+  const kept: string[] = [];
+  let used = 0;
+  for (const [index, line] of lines.entries()) {
+    if (index >= HEADER_LINES && !KEY_LINE.test(line)) {
+      continue;
+    }
+    if (used + line.length + 1 > MAX_EXCERPT_CHARS) {
+      break;
+    }
+    kept.push(line);
+    used += line.length + 1;
+  }
+  return kept.join('\n');
 }
 
 function anyPrompt(excerpt: string): string {
@@ -1139,14 +1180,16 @@ Champs :
 ${types}
 - provider : la compagnie d'assurance qui émet la police, recopiée telle qu'écrite
   (ex. « La Mobilière », « AXA », « Helvetia », « CSS »). Ni le courtier, ni l'agence.
-- productName : le nom du produit ou de l'offre (ex. « Ménage Plus », « Casco complète »).
+- productName : le nom du produit ou de l'offre (ex. « Ménage Plus », « Casco complète »). À défaut,
+  l'objet assuré tel que nommé : le modèle du véhicule, l'adresse du bâtiment.
 - policyNumber : le numéro de police ou de contrat, recopié exactement.
 - startDate : début du contrat ou de la période d'assurance, format AAAA-MM-JJ.
 - endDate : fin de la période contractuelle en cours ou échéance, format AAAA-MM-JJ.
 - premiumAmount : le montant de la prime TOTALE à payer, en francs, timbre et taxes compris.
 - premiumFrequency : la périodicité de cette prime : MENSUEL, TRIMESTRIEL, SEMESTRIEL ou ANNUEL.
-- franchise : la franchise en francs, si la police en indique une.
-- coverageAmount : la somme d'assurance principale en francs (ex. valeur du ménage assurée).
+- franchise : la franchise de la couverture principale en francs, 0 si la police indique 0.
+- coverageAmount : la somme d'assurance de la couverture principale en francs (ex. valeur du ménage,
+  somme de la responsabilité civile d'un véhicule).
 - cancellationNoticeMonths : le délai de résiliation en mois (ex. « 3 mois avant l'échéance » → 3).
 - avsNum : le numéro AVS au format 756.XXXX.XXXX.XX, ou null.
 - insuredName : nom et prénom du preneur d'assurance ou de la personne assurée.
@@ -1267,20 +1310,25 @@ export async function readAnyPolicy(text: string): Promise<AnyPolicyReading | nu
       }
     }
 
+    // Une franchise est un montant rond — 0, 200, 500, 2500 — jamais une prime
+    // à centimes que le modèle aurait prise dans la colonne voisine.
     const franchise = toNumber(raw.franchise);
-    if (franchise !== undefined && franchise >= 0 && franchise <= 50_000 && amountInText(franchise, digits)) {
+    if (franchise !== undefined && franchise >= 0 && franchise <= 50_000 && franchise % 50 === 0 &&
+        amountInText(franchise, digits)) {
       reading.franchise = franchise;
       reading.recognised.push('franchise');
     }
 
     const coverage = toNumber(raw.coverageAmount);
-    if (coverage !== undefined && coverage > 0 && coverage < 100_000_000 && amountInText(coverage, digits)) {
+    if (coverage !== undefined && coverage > 0 && coverage <= 1_000_000_000 && amountInText(coverage, digits)) {
       reading.coverageAmount = coverage;
       reading.recognised.push('somme assurée');
     }
 
+    // Le préavis ne se devine pas : le document doit écrire « 3 mois ».
     const notice = toNumber(raw.cancellationNoticeMonths);
-    if (notice !== undefined && Number.isInteger(notice) && notice >= 0 && notice <= 24) {
+    if (notice !== undefined && Number.isInteger(notice) && notice >= 0 && notice <= 24 &&
+        new RegExp(`(?<!\\d)${notice}\\s*(mois|monate?n?|mesi|months)`, 'i').test(text)) {
       reading.cancellationNoticeMonths = notice;
       reading.recognised.push('préavis');
     }

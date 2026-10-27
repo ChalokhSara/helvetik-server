@@ -1,6 +1,6 @@
 import { Client } from '../models/client.model';
 import { InsuranceType, PremiumFrequency } from '../models/insurance.model';
-import { extractFromDocument, ExtractionResult } from './document-extraction.service';
+import { analyseText, extractFromDocument, ExtractionResult } from './document-extraction.service';
 import { readAnyPolicy, readPolicy } from './policy-llm.service';
 import { catalogueFor } from './premium-catalogue.service';
 import { ageAt, matchInsured } from './household.service';
@@ -102,6 +102,27 @@ export async function scanPolicy(options: {
   requestedType?: InsuranceType;
 }): Promise<PolicyScan> {
   const result = await extractFromDocument(options.path, options.mimetype, options.filename);
+  return analysePolicy(result, options);
+}
+
+/**
+ * Même lecture, à partir du texte reconnu sur le téléphone. Plus rapide —
+ * ni téléversement d'image, ni reconnaissance optique côté serveur — et plus
+ * juste : la reconnaissance du téléphone abîme bien moins une photo.
+ */
+export async function scanPolicyText(options: {
+  userUid: string;
+  text: string;
+  requestedType?: InsuranceType;
+}): Promise<PolicyScan> {
+  const result = await analyseText(options.text, { source: 'TEXT' });
+  return analysePolicy(result, options);
+}
+
+async function analysePolicy(
+  result: ExtractionResult,
+  options: { userUid: string; requestedType?: InsuranceType }
+): Promise<PolicyScan> {
   const warnings = [...result.warnings];
   const recognised: string[] = [];
   const fields = result.fields;
