@@ -24,8 +24,8 @@ import {
 /** Insertions groupées : compromis entre mémoire et allers-retours Mongo. */
 const BATCH_SIZE = 5000;
 
-/** Valeur par défaut si l'administrateur n'en fournit pas (année 2026). */
-export const DEFAULT_REDISTRIBUTION_YEARLY = 61.8;
+/** Repli quand priminfo est injoignable : valeur mesurée sur priminfo pour 2027 (57.00, contre 61.80 en 2026). */
+export const DEFAULT_REDISTRIBUTION_YEARLY = 57;
 
 export interface ImportOptions {
   filename: string;
