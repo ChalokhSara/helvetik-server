@@ -4,6 +4,7 @@ import {
   CatalogueTariff,
   premiumsByTariff
 } from './premium-catalogue.service';
+import { INSURANCE_TYPES, InsuranceType, PremiumFrequency } from '../models/insurance.model';
 
 /**
  * Lecture d'une police d'assurance par un modèle de langage local.
@@ -33,8 +34,15 @@ import {
  */
 
 const DEFAULT_URL = 'http://ollama:11434';
-const DEFAULT_MODEL = 'llama3.2:3b';
-const DEFAULT_TIMEOUT_MS = 90_000;
+/**
+ * Qwen 2.5 7B plutôt que Llama 3.2 3B : sur des polices réelles, le petit
+ * modèle classait mal le type de contrat et confondait prime de base et prime
+ * totale. Celui-ci lit mieux le français et l'allemand et respecte le format
+ * JSON demandé, pour environ 5 Go de mémoire au lieu de 2.
+ */
+const DEFAULT_MODEL = 'qwen2.5:7b';
+/** Une police dense prend 85 s sur processeur ; la marge couvre une machine chargée. */
+const DEFAULT_TIMEOUT_MS = 150_000;
 
 /**
  * Fenêtre de contexte demandée à Ollama.
@@ -253,9 +261,17 @@ async function ask<T>(prompt: string, maxTokens: number): Promise<AskResult<T>> 
     return { value: JSON.parse(raw) as T, truncated };
   } catch {
     // Ceinture et bretelles : `format: json` peut être ignoré par un modèle
-    // ancien, on récupère alors le premier objet du texte.
-    const match = raw.match(/\{[\s\S]*\}/);
-    return { value: match ? JSON.parse(match[0]) as T : null, truncated };
+    // ancien, on récupère alors le premier objet complet du texte — même suivi
+    // d'une accolade de trop, qu'un petit modèle ajoute volontiers.
+    const start = raw.indexOf('{');
+    for (let end = raw.indexOf('}', start); start >= 0 && end > start; end = raw.indexOf('}', end + 1)) {
+      try {
+        return { value: JSON.parse(raw.slice(start, end + 1)) as T, truncated };
+      } catch {
+        // Objet encore incomplet : on essaie l'accolade fermante suivante.
+      }
+    }
+    return { value: null, truncated };
   }
 }
 
@@ -1033,6 +1049,303 @@ export async function readPolicy(
     return reading;
   } catch (err) {
     console.error('[police] lecture par modèle de langage impossible:', (err as Error).message);
+    return null;
+  }
+}
+
+// ===================================================== toutes les polices
+
+/**
+ * Lecture d'une police de n'importe quel type : ménage, RC, véhicule, vie,
+ * complémentaire, LAMal…
+ *
+ * Contrairement à la LAMal, ces contrats n'ont pas de catalogue officiel
+ * contre lequel valider la réponse. Les garde-fous sont donc tirés du document
+ * lui-même : un numéro de police ou un assureur qui n'y figure pas est écarté,
+ * un montant ou une date invraisemblable aussi. Le modèle propose, le texte
+ * tranche, l'assuré relit.
+ */
+export interface AnyPolicyReading {
+  type?: InsuranceType;
+  provider?: string;
+  productName?: string;
+  policyNumber?: string;
+  startDate?: string;
+  endDate?: string;
+  premiumAmount?: number;
+  premiumFrequency?: PremiumFrequency;
+  franchise?: number;
+  coverageAmount?: number;
+  cancellationNoticeMonths?: number;
+  avsNum?: string;
+  insuredName?: string;
+  insuredBirthdate?: string;
+  notes?: string;
+  warnings: string[];
+  recognised: string[];
+}
+
+interface RawAny {
+  type?: unknown;
+  provider?: unknown;
+  productName?: unknown;
+  policyNumber?: unknown;
+  startDate?: unknown;
+  endDate?: unknown;
+  premiumAmount?: unknown;
+  premiumFrequency?: unknown;
+  franchise?: unknown;
+  coverageAmount?: unknown;
+  cancellationNoticeMonths?: unknown;
+  avsNum?: unknown;
+  insuredName?: unknown;
+  insuredBirthdate?: unknown;
+  notes?: unknown;
+}
+
+/** Ce que chaque type recouvre, pour que le modèle classe sans hésiter. */
+const TYPE_GUIDE: Record<InsuranceType, string> = {
+  LAMAL: 'assurance maladie de base obligatoire (LAMal, KVG, AOS, Grundversicherung)',
+  COMPLEMENTAIRE_SANTE: 'assurance maladie complémentaire (LCA, VVG, hospitalisation, dentaire, médecines alternatives)',
+  ACCIDENT: 'assurance accidents (LAA, UVG) hors couverture de la LAMal',
+  INDEMNITE_JOURNALIERE: 'indemnités journalières, perte de gain (Taggeld)',
+  VIE: 'assurance vie, prévoyance, 3e pilier (pilier 3a/3b, Säule 3a)',
+  RC_PRIVEE: 'responsabilité civile privée (Privathaftpflicht)',
+  MENAGE: 'inventaire du ménage (Hausrat), souvent combinée avec la RC privée',
+  BATIMENT: 'bâtiment, propriétaire d\'immeuble (Gebäude)',
+  VEHICULE: 'véhicule à moteur, auto, moto : RC véhicule, casco (Motorfahrzeug)',
+  PROTECTION_JURIDIQUE: 'protection juridique (Rechtsschutz)',
+  VOYAGE: 'assurance voyage, annulation, assistance (Reiseversicherung)',
+  ANIMAUX: 'animaux de compagnie (Tierversicherung)',
+  AUTRE: 'tout autre contrat d\'assurance'
+};
+
+/** En-tête toujours conservé : il porte l'assureur, le preneur et souvent le numéro. */
+const HEADER_LINES = 20;
+
+/** Lignes qui portent les données d'un contrat, où qu'elles soient dans le document. */
+const KEY_LINE = /\d|police|contrat|prime|pr[äa]mie|[ée]ch[ée]ance|r[ée]siliation|k[üu]ndigung|franchise|selbstbehalt|somme|montant|dur[ée]e|valable|g[üu]ltig|preneur|assur[ée]/i;
+
+/**
+ * Extrait envoyé au modèle, quelle que soit la longueur du contrat.
+ *
+ * Un contrat de quinze pages ne tient pas dans la fenêtre du modèle, et ses
+ * données utiles ne sont pas toutes au début : le décompte de prime figure
+ * parfois en troisième page. On garde donc l'en-tête, puis les lignes qui
+ * portent des chiffres ou des mots clés, dans l'ordre du document, jusqu'à
+ * remplir le budget. Les conditions générales, longues et sans chiffres,
+ * tombent d'elles-mêmes.
+ */
+function policyExcerpt(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .filter((line) => !BOILERPLATE.test(line))
+    .filter((line) => !(line.length > 160 && !/\d/.test(line)));
+
+  const all = lines.join('\n');
+  if (all.length <= MAX_EXCERPT_CHARS) {
+    return all;
+  }
+
+  const kept: string[] = [];
+  let used = 0;
+  for (const [index, line] of lines.entries()) {
+    if (index >= HEADER_LINES && !KEY_LINE.test(line)) {
+      continue;
+    }
+    if (used + line.length + 1 > MAX_EXCERPT_CHARS) {
+      break;
+    }
+    kept.push(line);
+    used += line.length + 1;
+  }
+  return kept.join('\n');
+}
+
+function anyPrompt(excerpt: string): string {
+  const types = (Object.entries(TYPE_GUIDE) as Array<[InsuranceType, string]>)
+    .map(([code, label]) => `  ${code} : ${label}`)
+    .join('\n');
+
+  return `Tu lis une police d'assurance suisse. Le texte vient d'un PDF ou d'une
+reconnaissance optique : il peut être désordonné, en français, en allemand ou en italien.
+
+Extrais uniquement ce que le document contient. N'invente rien : un champ absent ou
+illisible vaut null.
+
+Champs :
+- type : un seul de ces codes, celui du contrat principal de la police :
+${types}
+- provider : la compagnie d'assurance qui émet la police, recopiée telle qu'écrite
+  (ex. « La Mobilière », « AXA », « Helvetia », « CSS »). Ni le courtier, ni l'agence.
+- productName : le nom du produit ou de l'offre (ex. « Ménage Plus », « Casco complète »). À défaut,
+  l'objet assuré tel que nommé : le modèle du véhicule, l'adresse du bâtiment.
+- policyNumber : le numéro de police ou de contrat, recopié exactement.
+- startDate : début du contrat ou de la période d'assurance, format AAAA-MM-JJ.
+- endDate : fin de la période contractuelle en cours ou échéance, format AAAA-MM-JJ.
+- premiumAmount : le montant de la prime TOTALE à payer, en francs, timbre et taxes compris.
+- premiumFrequency : la périodicité de cette prime : MENSUEL, TRIMESTRIEL, SEMESTRIEL ou ANNUEL.
+- franchise : la franchise de la couverture principale en francs, 0 si la police indique 0.
+- coverageAmount : la somme d'assurance de la couverture principale en francs (ex. valeur du ménage,
+  somme de la responsabilité civile d'un véhicule).
+- cancellationNoticeMonths : le délai de résiliation en mois (ex. « 3 mois avant l'échéance » → 3).
+- avsNum : le numéro AVS au format 756.XXXX.XXXX.XX, ou null.
+- insuredName : nom et prénom du preneur d'assurance ou de la personne assurée.
+- insuredBirthdate : sa date de naissance, format AAAA-MM-JJ, ou null.
+- notes : une seule phrase, 200 caractères au maximum, avec les précisions utiles sans
+  champ dédié (véhicule et plaques, adresse du risque, couvertures incluses). null sinon.
+
+Réponds par ce seul objet JSON :
+{"type":null,"provider":null,"productName":null,"policyNumber":null,"startDate":null,"endDate":null,"premiumAmount":null,"premiumFrequency":null,"franchise":null,"coverageAmount":null,"cancellationNoticeMonths":null,"avsNum":null,"insuredName":null,"insuredBirthdate":null,"notes":null}
+
+Document :
+"""
+${excerpt}
+"""`;
+}
+
+const FREQUENCIES: PremiumFrequency[] = ['MENSUEL', 'TRIMESTRIEL', 'SEMESTRIEL', 'ANNUEL'];
+
+/** Lettres et chiffres seuls : « 12.345.678 » et « 12 345 678 » se valent. */
+function compact(value: string): string {
+  return value.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * L'assureur nommé figure-t-il dans le document ? Un de ses mots significatifs
+ * suffit — « Mobilière » pour « La Mobilière Suisse Société d'assurances » —,
+ * avec une tolérance d'un caractère pour les dégâts de la reconnaissance.
+ */
+function providerInText(provider: string, haystack: string): boolean {
+  const significant = words(provider).trim().split(' ')
+    .filter((word) => word.length >= 3 && !/^(sa|ag|la|le|les|der|die|das|und|assurance[s]?|versicherung(en)?|societe|compagnie|suisse|schweiz)$/.test(word));
+  return significant.some((word) =>
+    containsWord(haystack, word) || (word.length >= 6 && containsFuzzy(haystack, word, 1)));
+}
+
+/**
+ * Un montant rendu par le modèle se retrouve-t-il dans le document ? Les
+ * francs entiers suffisent : la reconnaissance abîme plus volontiers les
+ * centimes et les séparateurs (« 1'234.50 », « 1 234,50 ») que les chiffres.
+ */
+function amountInText(amount: number, digits: string): boolean {
+  return digits.includes(String(Math.trunc(amount)));
+}
+
+export async function readAnyPolicy(text: string): Promise<AnyPolicyReading | null> {
+  const { enabled } = config();
+  if (!enabled || text.trim().length < 40) {
+    return null;
+  }
+
+  const excerpt = policyExcerpt(text);
+  const reading: AnyPolicyReading = { warnings: [], recognised: [] };
+  const haystack = words(text);
+  const compactText = compact(text);
+  const digits = text.replace(/['’\s]/g, '');
+
+  try {
+    const answer = await ask<RawAny>(anyPrompt(excerpt), 450);
+    const raw = answer.value;
+    if (!raw) {
+      return null;
+    }
+    if (answer.truncated) {
+      reading.warnings.push(
+        'Le document est trop long pour être lu d\'un seul tenant : vérifiez chaque champ.'
+      );
+    }
+
+    const type = toText(raw.type, 40)?.toUpperCase();
+    if (type && (INSURANCE_TYPES as readonly string[]).includes(type)) {
+      reading.type = type as InsuranceType;
+      reading.recognised.push('type de contrat');
+    }
+
+    const provider = toText(raw.provider, 80);
+    if (provider) {
+      if (providerInText(provider, haystack)) {
+        reading.provider = provider;
+        reading.recognised.push('assureur');
+      } else {
+        console.warn(`[police] assureur « ${provider} » absent du document, écarté.`);
+      }
+    }
+
+    const product = toText(raw.productName, 80);
+    if (product) {
+      reading.productName = product;
+      reading.recognised.push('produit');
+    }
+
+    // Le numéro de police ne se devine pas : absent du texte, il est inventé.
+    const policyNumber = toText(raw.policyNumber, 40);
+    if (policyNumber && compact(policyNumber).length >= 4 && compactText.includes(compact(policyNumber))) {
+      reading.policyNumber = policyNumber;
+      reading.recognised.push('n° de police');
+    } else if (policyNumber) {
+      console.warn(`[police] n° de police « ${policyNumber} » absent du document, écarté.`);
+    }
+
+    const startDate = typeof raw.startDate === 'string' ? parseDate(raw.startDate) : undefined;
+    const endDate = typeof raw.endDate === 'string' ? parseDate(raw.endDate) : undefined;
+    if (startDate) {
+      reading.startDate = startDate;
+      reading.recognised.push('date de début');
+    }
+    if (endDate && (!startDate || endDate > startDate)) {
+      reading.endDate = endDate;
+      reading.recognised.push('échéance');
+    }
+
+    const premium = toNumber(raw.premiumAmount);
+    if (premium !== undefined && premium > 0 && premium < 50_000 && amountInText(premium, digits)) {
+      reading.premiumAmount = Math.round(premium * 100) / 100;
+      reading.recognised.push('prime');
+      const frequency = toText(raw.premiumFrequency, 20)?.toUpperCase() as PremiumFrequency | undefined;
+      if (frequency && FREQUENCIES.includes(frequency)) {
+        reading.premiumFrequency = frequency;
+      }
+    }
+
+    // Une franchise est un montant rond — 0, 200, 500, 2500 — jamais une prime
+    // à centimes que le modèle aurait prise dans la colonne voisine.
+    const franchise = toNumber(raw.franchise);
+    if (franchise !== undefined && franchise >= 0 && franchise <= 50_000 && franchise % 50 === 0 &&
+        amountInText(franchise, digits)) {
+      reading.franchise = franchise;
+      reading.recognised.push('franchise');
+    }
+
+    const coverage = toNumber(raw.coverageAmount);
+    if (coverage !== undefined && coverage > 0 && coverage <= 1_000_000_000 && amountInText(coverage, digits)) {
+      reading.coverageAmount = coverage;
+      reading.recognised.push('somme assurée');
+    }
+
+    // Le préavis ne se devine pas : le document doit écrire « 3 mois ».
+    const notice = toNumber(raw.cancellationNoticeMonths);
+    if (notice !== undefined && Number.isInteger(notice) && notice >= 0 && notice <= 24 &&
+        new RegExp(`(?<!\\d)${notice}\\s*(mois|monate?n?|mesi|months)`, 'i').test(text)) {
+      reading.cancellationNoticeMonths = notice;
+      reading.recognised.push('préavis');
+    }
+
+    const avs = toText(raw.avsNum, 20);
+    if (avs && /^756\.\d{4}\.\d{4}\.\d{2}$/.test(avs) && compactText.includes(compact(avs))) {
+      reading.avsNum = avs;
+    }
+
+    reading.insuredName = toText(raw.insuredName, 80);
+    const birthdate = typeof raw.insuredBirthdate === 'string' ? parseBirthdate(raw.insuredBirthdate) : undefined;
+    reading.insuredBirthdate = birthdate;
+    reading.notes = toText(raw.notes, 200);
+
+    return reading;
+  } catch (err) {
+    console.error('[police] lecture générale par modèle de langage impossible:', (err as Error).message);
     return null;
   }
 }

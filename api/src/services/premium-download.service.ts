@@ -6,6 +6,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { PremiumYear } from '../models/premium.model';
 import { importWorkbook, ImportResult } from './premium-import.service';
+import { updateRedistribution } from './redistribution.service';
 
 /**
  * Téléchargement des fichiers officiels de l'OFSP.
@@ -171,6 +172,17 @@ export async function syncPremiumsFromOfsp(options: {
       const message = (err as Error).message;
       outcome.errors.push(`${source.filename} : ${message}`);
       console.error(`[primes] échec du téléchargement de ${source.filename} :`, message);
+    }
+  }
+
+  // Nouvelles primes : la redistribution de l'année est lue sur priminfo, au
+  // lieu d'hériter d'une valeur figée qui fausserait chaque prime affichée.
+  // Seulement à l'import des primes, pour ne pas écraser une correction faite
+  // depuis la console lors d'une synchronisation sans nouveauté.
+  for (const result of outcome.results.filter((r) => r.kind === 'PREMIUMS')) {
+    const message = await updateRedistribution(result.year);
+    if (message) {
+      outcome.skipped.push(message);
     }
   }
 

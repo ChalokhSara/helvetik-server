@@ -66,9 +66,9 @@ x-api-env: &api-env
   # optique est confié à un modèle de langage local, jamais à un service
   # externe — une police porte nom, adresse, n° AVS et n° de police.
   OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
-  OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
   OLLAMA_ENABLED: ${OLLAMA_ENABLED:-true}
-  OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-90000}
+  OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-150000}
 
   # Envoi des courriers par ePost (oneAPI de la Poste).
   #
@@ -224,7 +224,7 @@ services:
         until ollama list >/dev/null 2>&1; do
           echo "attente du service ollama…"; sleep 2;
         done
-        ollama pull "${OLLAMA_MODEL:-llama3.2:3b}"
+        ollama pull "${OLLAMA_MODEL:-qwen2.5:7b}"
     restart: "no"
     networks:
       - app-network

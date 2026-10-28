@@ -52,7 +52,9 @@ if (process.env.TRUST_PROXY) {
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+// 100 Ko par défaut : trop peu pour le texte d'un contrat de plusieurs dizaines
+// de pages, reconnu sur le téléphone et envoyé à /api/insurances/scan-text.
+app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Session (console d'administration desktop), persistée dans MongoDB pour
